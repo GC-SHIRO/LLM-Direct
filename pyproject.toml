@@ -1,0 +1,23 @@
+[project]
+name = "llm-direct"
+version = "0.1.0"
+description = "MCP harness for frontier models to operate the Dobot X-Trainer (3 cameras + 2 arms)"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.3,<3",
+    "numpy",
+    "pillow",
+]
+
+[project.optional-dependencies]
+real = ["pyrealsense2", "pyserial"]
+
+[project.scripts]
+llm-direct = "llm_direct.server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["llm_direct"]

@@ -1,0 +1,5 @@
+- insert:
+    - id: llm-direct-workbench
+      name: '@local/dsh-llm-direct-workbench'
+      config:
+        projectDir: 'C:\Users\Administrator\Desktop\LLM-Direct'

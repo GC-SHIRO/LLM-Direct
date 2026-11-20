@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+.workbench-venv/
+venv/
+
+# Temp folders left by pip / tests
+tmp*/
+pip-*/
+
+# Runtime output
+logs/
+motion_guide/raw/
+
+# Node (dsh-plugin)
+node_modules/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
