@@ -177,8 +177,9 @@ class Robot:
             return True
         with self._confirm_lock:
             print(f"\n[SUPERVISED] {description}\n  Enter = execute, anything else = refuse: ", end="", file=sys.stderr, flush=True)
-            answer = sys.stdin.readline().strip()
-        return answer == ""
+            # EOF (a detached terminal) is not the operator pressing Enter.
+            answer = sys.stdin.readline()
+        return answer in ("\n", "\r\n")
 
     def _run_motion(self, name: str, description: str, send, extra: dict | None = None) -> dict:
         """Common path: watchdog -> lock -> confirm -> send -> wait -> report."""

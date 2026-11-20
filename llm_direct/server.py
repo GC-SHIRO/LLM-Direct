@@ -248,7 +248,9 @@ def operate_xtrainer(task: str = ""):
     if g["recorded"]:
         msgs.append(_motion_guide_text(g))
         msgs += [Image(data=b, format="jpeg") for b in g["sheets"].values()]
-    msgs.append(f"Task: {task}" if task else "Wait for the user's task. First observe: get_state and get_images.")
+    msgs.append(f"Task: {task}" if task else
+                "You are now the X-Trainer operator. Run the readiness check, report the robot status "
+                "in one short message, then wait for instructions.")
     return msgs
 
 

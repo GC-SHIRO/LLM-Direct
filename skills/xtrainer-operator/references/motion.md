@@ -34,10 +34,5 @@ Turning image directions into commands: to bring the gripper towards an object t
 - Motions are smooth and precise (repeatability ±0.05 mm; a measured 5 mm move landed exactly on target). If the image disagrees with the commanded move, suspect your direction mapping, not the arm.
 - Robot state updates every ~8 ms; `get_state` is always fresh.
 - The gripper takes roughly 0.2–1 s to open or close.
-- `stop()` halts the arm with a short braking distance (not yet measured; expect a few mm at this speed).
-
-## Typical heights (fill in with measured values once available)
-
-- Table / foam surface: z = TODO mm (left), TODO mm (right)
-- Safe travel height above the table: table + 100 mm or more
-- Fingertip offset below the flange: TODO mm
+- `stop()` halts the arm with a short braking distance (a few mm at this speed).
+- Table height is not given in numbers: judge the gripper's height above the table from the images, and keep a generous clearance (about 100 mm) when travelling sideways.

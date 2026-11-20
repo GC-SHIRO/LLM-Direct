@@ -30,7 +30,7 @@ Reachability is better near the middle of the reach. Poses near full stretch (�
 
 - One parallel two-finger gripper on each arm's flange, driven by a serial servo.
 - Opening range 0–95 mm, commanded as **0.0 = closed, 1.0 = fully open**.
-- The fingertips are some distance beyond the reported flange position along the tool axis. The exact length is not configured yet; estimate it from the wrist image (the fingers are visible at the bottom of the wrist view).
+- The fingertips are some distance beyond the reported flange position along the tool axis; judge their position from the wrist image (the fingers are visible at the bottom of the wrist view).
 - No force sensor. A closing gripper that stops early (`likely_holding_object: true`) is the only grip signal.
 
 ## Cameras (Intel RealSense D405, 640 × 480, colour + depth)
