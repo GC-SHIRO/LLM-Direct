@@ -21,6 +21,12 @@ const COPY = {
   settings: ['工作台设置', 'Workbench settings'], done: ['完成', 'Done'], defaults: ['恢复默认', 'Reset defaults'],
   theme: ['面板外观', 'Appearance'], system: ['跟随系统', 'System'], light: ['浅色', 'Light'], dark: ['深色', 'Dark'],
   precision: ['读数小数位', 'Telemetry decimals'], interval: ['状态轮询间隔', 'Status poll interval'],
+  connection: ['连接目标', 'Connection target'], local: ['本地模拟', 'Local mock'], remote: ['远程（只读）', 'Remote (read-only)'],
+  token: ['访问令牌（仅本次）', 'Access token (not saved)'], address: ['远程地址', 'Remote address'], applyConnection: ['应用连接', 'Apply connection'],
+  connectionNote: ['新面板从本地模拟开始。点击“应用连接”才会切换当前面板。', 'New panes start on the local mock. Apply to switch this pane only.'],
+  targetLabel: ['当前目标', 'Active target'], readOnly: ['远程只读：仅查看状态和画面，无法控制或停止机械臂。', 'Remote is read-only: state and cameras only. Motion and stop are disabled.'],
+  invalidAddress: ['请输入完整的 http(s):// 地址，路径为 /mcp，不含凭据、查询或片段。', 'Enter a full http(s):// address with path /mcp and no credentials, query or fragment.'],
+  realConnected: ['实机已连接', 'Real robot connected'], remoteNoState: ['未收到有效的实机或模拟状态', 'No valid real or mock status returned'],
   preferencesNote: ['仅保存在本机；不会改变机械臂动作。', 'Saved on this device. Does not change robot motion.'],
   pollNote: ['仅在开启轮询时生效，不刷新相机。', 'Only when polling is on. Cameras are not refreshed.'],
 };
@@ -31,6 +37,15 @@ const DEFAULT_PREF = { theme: 'system', precision: '1', interval: '2500' };
 const OPTIONS = { theme: ['system', 'light', 'dark'], precision: ['0', '1', '2'], interval: ['1000', '2500', '5000'] };
 function normalizePrefs(value) {
   return Object.fromEntries(Object.entries(OPTIONS).map(([key, allowed]) => [key, allowed.includes(value?.[key]) ? value[key] : DEFAULT_PREF[key]]));
+}
+const CONNECTION_KEY = 'llm-direct-workbench.connection.v1';
+function remoteAddress(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!/^https?:\/\/[^\s/@?#\\]+\/mcp$/i.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    return url.pathname === '/mcp' ? url.href : null;
+  } catch { return null; }
 }
 const STALE_MS = 8000;
 const mounted = new WeakMap();
@@ -64,7 +79,7 @@ function resultReason(data) {
     .join('; ');
 }
 
-/** Mount the mock-only panel and return its idempotent disposer. */
+/** Mount an independently targeted panel and return its idempotent disposer. */
 export function mountWorkbench(root, call) {
   mounted.get(root)?.();
   const panel = root.ownerDocument.createElement('section');
@@ -72,7 +87,7 @@ export function mountWorkbench(root, call) {
   panel.dataset.label = 'title';
   panel.innerHTML = `
     <header class="llmd-wb__bar llmd-wb__head">
-      <div class="llmd-wb__brand"><h2 data-i18n="title"></h2><span class="llmd-wb__eyebrow" data-i18n="simulation"></span></div>
+      <div class="llmd-wb__brand"><h2 data-i18n="title"></h2><span class="llmd-wb__eyebrow" data-out="target"></span></div>
       <div class="llmd-wb__buttons">
         <button type="button" data-action="refresh" data-i18n="refresh"></button>
         <label class="llmd-wb__poll"><input type="checkbox" data-poll><span data-i18n="poll"></span></label>
@@ -82,6 +97,16 @@ export function mountWorkbench(root, call) {
     <div class="llmd-wb__rail"><p class="llmd-wb__status" role="status" data-out="status"></p><button class="llmd-wb__settings-trigger" type="button" data-action="settings" data-label="settings" aria-haspopup="dialog"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h9m4 0h3M4 17h3m4 0h9"/><circle cx="15" cy="7" r="2.5"/><circle cx="9" cy="17" r="2.5"/></svg></button></div>
     <dialog class="llmd-wb__prefs" data-label="settings">
       <h3 data-i18n="settings"></h3><p class="llmd-wb__hint" data-i18n="preferencesNote"></p>
+      <fieldset class="llmd-wb__connection"><legend data-i18n="connection"></legend>
+        <p class="llmd-wb__hint" data-out="active-target"></p>
+        <label><span data-i18n="connection"></span><select data-connection-mode><option value="local" data-i18n="local"></option><option value="remote" data-i18n="remote"></option></select></label>
+        <label><span data-i18n="address"></span><input type="url" data-endpoint placeholder="http://192.168.1.50:8765/mcp" autocomplete="off" spellcheck="false"></label>
+        <label><span data-i18n="token"></span><input type="password" data-token maxlength="1024" autocomplete="off" spellcheck="false"></label>
+        <p class="llmd-wb__hint" data-i18n="connectionNote"></p>
+        <p class="llmd-wb__hint" data-i18n="readOnly"></p>
+        <p role="status" data-kind="error" data-out="address-error"></p>
+        <button type="button" data-action="apply-connection" data-i18n="applyConnection"></button>
+      </fieldset>
       <label><span data-i18n="theme"></span><select data-pref="theme">${OPTIONS.theme.map(v => `<option value="${v}" data-i18n="${v}"></option>`).join('')}</select></label>
       <label><span data-i18n="precision"></span><select data-pref="precision">${OPTIONS.precision.map(v => `<option>${v}</option>`).join('')}</select></label>
       <label><span data-i18n="interval"></span><select data-pref="interval">${OPTIONS.interval.map(v => `<option value="${v}">${Number(v)/1000} s</option>`).join('')}</select></label>
@@ -131,6 +156,20 @@ export function mountWorkbench(root, call) {
   const dialog = panel.querySelector('dialog');
   const settingsButton = panel.querySelector('[data-action="settings"]');
   const prefInputs = [...dialog.querySelectorAll('[data-pref]')];
+  const modeInput = dialog.querySelector('[data-connection-mode]');
+  const addressInput = dialog.querySelector('[data-endpoint]');
+  const tokenInput = dialog.querySelector('[data-token]');
+  let activeToken = ''; // Memory only and bound to this pane's applied endpoint.
+  const applyButton = dialog.querySelector('[data-action="apply-connection"]');
+  let endpoint = null; // Per pane. Saved values prefill the editor; only Apply changes this target.
+  let addressError = false;
+  let savedAddress = '';
+  try {
+    const saved = JSON.parse(clock.localStorage.getItem(CONNECTION_KEY));
+    savedAddress = remoteAddress(saved?.address) || '';
+    modeInput.value = saved?.mode === 'remote' ? 'remote' : 'local';
+  } catch { /* storage unavailable */ }
+  addressInput.value = savedAddress;
   let prefs = { ...DEFAULT_PREF };
   try { prefs = normalizePrefs(JSON.parse(clock.localStorage.getItem(PREF_KEY))); } catch { /* unavailable or corrupt */ }
   let language = 'zh';
@@ -205,6 +244,7 @@ export function mountWorkbench(root, call) {
   }
 
   function moveBlock(arm) {
+    if (endpoint !== null) return t('readOnly');
     if (stopping) return t('stopping');
     if (motion) return t('busy');
     if (!mockVerified || connectionDetail.length || !snapshot) return t('needMock');
@@ -217,6 +257,13 @@ export function mountWorkbench(root, call) {
 
   function render() {
     const busy = Boolean(motion || stopping);
+    const target = endpoint === null ? t('local') : `${t('remote')} · ${endpoint}`;
+    output('target', target);
+    output('active-target', `${t('targetLabel')}: ${target}`);
+    output('address-error', addressError ? t('invalidAddress') : '');
+    applyButton.disabled = busy;
+    modeInput.disabled = busy;
+    addressInput.disabled = tokenInput.disabled = busy || modeInput.value !== 'remote';
     let status = t('connecting');
     let kind = '';
     if (connectionDetail.length) {
@@ -228,7 +275,7 @@ export function mountWorkbench(root, call) {
       status = t('stale');
       kind = 'error';
     } else if (snapshot) {
-      status = text('connected', detailText(snapshot.mode));
+      status = text(snapshot.mock ? 'connected' : 'realConnected', detailText(snapshot.mode));
       kind = 'ok';
     }
     outputs.status.dataset.kind = kind;
@@ -249,7 +296,7 @@ export function mountWorkbench(root, call) {
     output('motion-hint', reason || t('jogHint'));
     refreshButton.disabled = busy || observation?.full === true;
     // Retain an out-of-band stop path if a previously verified mock connection drops.
-    stopButton.disabled = Boolean(stopping || !mockVerified);
+    stopButton.disabled = Boolean(endpoint !== null || stopping || !mockVerified);
   }
 
   function showFrame(image) {
@@ -268,9 +315,9 @@ export function mountWorkbench(root, call) {
     const startedAt = clock.performance.now();
     render();
     try {
-      const { data } = await call('get_state', { arm: 'both' });
+      const { data } = await call('get_state', { arm: 'both' }, endpoint, activeToken);
       if (!isCurrent(token)) return;
-      if (data?.mock === false) {
+      if (endpoint === null && data?.mock === false) {
         mockVerified = false;
         snapshot = null;
         frame.removeAttribute('src');
@@ -280,17 +327,17 @@ export function mountWorkbench(root, call) {
         connectionDetail = ['nonMock'];
         return;
       }
-      if (data?.ok !== true || data.mock !== true || !data.arms?.left || !data.arms?.right) {
-        throw new Error(data?.reason || 'noState');
+      if (data?.ok !== true || typeof data.mock !== 'boolean' || !data.arms?.left || !data.arms?.right) {
+        throw new Error(data?.reason || (endpoint === null ? 'noState' : 'remoteNoState'));
       }
-      mockVerified = true;
+      mockVerified = endpoint === null && data.mock;
       snapshot = data;
       sampleAt = startedAt;
       connectionDetail = [];
       render();
       if (full) {
         try {
-          const { image } = await call('get_images', { grid: false });
+          const { image } = await call('get_images', { grid: false }, endpoint, activeToken);
           if (isCurrent(token) && !showFrame(image)) throw new Error('noImage');
         } catch (error) {
           if (isCurrent(token)) cameraDetail = errorText(error);
@@ -325,7 +372,7 @@ export function mountWorkbench(root, call) {
     feedback('busy', '', label);
     render();
     try {
-      const { data, image } = await call(tool, args);
+      const { data, image } = await call(tool, args, endpoint);
       if (!isCurrent(token)) return;
       if (data?.ok === true) {
         const outcome = data.dry_run || data.arms?.[args.arm]?.dry_run ? 'dryResult' : 'success';
@@ -353,7 +400,7 @@ export function mountWorkbench(root, call) {
   }
 
   async function stop() {
-    if (disposed || stopping || !mockVerified) return;
+    if (disposed || endpoint !== null || stopping || !mockVerified) return;
     const token = invalidateObservation();
     stopping = token;
     sampleAt = null;
@@ -361,7 +408,7 @@ export function mountWorkbench(root, call) {
     feedback('stopping');
     render();
     try {
-      const { data } = await call('stop', { arm: 'both' });
+      const { data } = await call('stop', { arm: 'both' }, endpoint);
       if (!isCurrent(token)) return;
       if (data?.ok === true) feedback('stopOk', 'ok');
       else if (data?.ok === false) feedback('stopFail', 'error', () => resultReason(data) || t('noDetails'));
@@ -381,11 +428,37 @@ export function mountWorkbench(root, call) {
     }
   }
 
+  function applyConnection() {
+    if (disposed || motion || stopping) return;
+    const remote = modeInput.value === 'remote';
+    const next = remote ? remoteAddress(addressInput.value) : null;
+    addressError = remote && !next;
+    if (addressError) { render(); addressInput.focus(); return; }
+    if (remote) savedAddress = next;
+    addressInput.value = savedAddress;
+    try { clock.localStorage.setItem(CONNECTION_KEY, JSON.stringify({ mode: modeInput.value, address: savedAddress })); } catch { /* storage unavailable */ }
+    // Reuse the active secret only for the identical endpoint, never for a changed host.
+    activeToken = remote ? (tokenInput.value.trim() || (next === endpoint ? activeToken : '')) : '';
+    tokenInput.value = '';
+    invalidateObservation();
+    endpoint = next;
+    mockVerified = false;
+    snapshot = sampleAt = null;
+    frame.removeAttribute('src');
+    frame.hidden = true;
+    outputs['image-placeholder'].hidden = false;
+    cameraDetail = '';
+    connectionDetail = [];
+    actionFeedback = ['noAction', '', ''];
+    void refresh(true);
+  }
+
   function onClick(event) {
     const button = event.target.closest?.('button');
     if (!button || !panel.contains(button) || button.disabled) return;
     const arm = armSelect.value;
     switch (button.dataset.action) {
+      case 'apply-connection': applyConnection(); break;
       case 'settings': dialog.showModal(); break;
       case 'done': dialog.close(); break;
       case 'defaults': prefs = { ...DEFAULT_PREF }; applyPrefs(true); schedulePoll(); render(); break;
@@ -404,6 +477,7 @@ export function mountWorkbench(root, call) {
   }
 
   function onChange(event) {
+    if (event.target === modeInput || event.target === addressInput) { addressError = false; render(); }
     if (event.target === languageSelect) {
       language = languageSelect.value === 'en' ? 'en' : 'zh';
       try { clock.localStorage.setItem(LANGUAGE_KEY, language); } catch { /* storage unavailable */ }

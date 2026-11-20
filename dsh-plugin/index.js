@@ -1,5 +1,6 @@
 import { isAbsolute } from 'node:path';
 import { createBridge } from './bridge.js';
+import { remoteRead } from './remote.js';
 
 export const inject = ['connection'];
 const path = '/api/llm-direct-workbench/call';
@@ -31,7 +32,11 @@ export function apply(ctx, config) {
       finally { reader.releaseLock(); }
       if (typeof input?.tool !== 'string' || !input.args || typeof input.args !== 'object' || Array.isArray(input.args)) return reply({ error: 'Invalid tool or arguments' }, 400);
       if (request.signal.aborted) return reply({ error: 'Request cancelled' }, 400);
-      try { return reply(await bridge.call(input.tool, input.args)); }
+      // A supplied endpoint is always remote. Never fall back to the local simulator on error.
+      if ('endpoint' in input && (typeof input.endpoint !== 'string' || !input.endpoint.trim())) return reply({ error: 'Invalid remote MCP endpoint' }, 400);
+      if ('endpoint' in input && !['get_state', 'get_images'].includes(input.tool)) return reply({ error: 'Remote MCP connection is read-only' }, 403);
+      if ('token' in input && (!input.endpoint || typeof input.token !== 'string' || !/^[\x21-\x7e]{1,1024}$/.test(input.token))) return reply({ error: 'Invalid remote token' }, 400);
+      try { return reply('endpoint' in input ? await remoteRead(input.endpoint, input.tool, input.args, request.signal, input.token) : await bridge.call(input.tool, input.args)); }
       catch (error) { return reply({ error: error.message }, 502); }
     },
   });

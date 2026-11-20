@@ -15,12 +15,12 @@ window.__ModuleLoader__.load({
         h('rect', { x: 4, y: 7, width: 16, height: 12, rx: 3 }),
         h('path', { d: 'M12 3v4M8 12h1m6 0h1m-7 3h6M2 12v3m20-3v3' }));
     }
-    async function call(tool, args, signal) {
+    async function call(tool, args, signal, endpoint, token) {
       const path = 'api/llm-direct-workbench/call';
       const transport = globalThis.__DSH_TRANSPORT__;
       const init = {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ tool, args }), signal: AbortSignal.any([signal, AbortSignal.timeout(48_000)]),
+        body: JSON.stringify({ tool, args, ...(endpoint == null ? {} : { endpoint, ...(token ? { token } : {}) }) }), signal: AbortSignal.any([signal, AbortSignal.timeout(48_000)]),
       };
       const response = transport?.fetch
         ? await transport.fetch(path, init)
@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
       const root = useRef(null);
       useEffect(() => {
         const controller = new AbortController();
-        const dispose = mountWorkbench(root.current, (tool, args) => call(tool, args, controller.signal));
+        const dispose = mountWorkbench(root.current, (tool, args, endpoint, token) => call(tool, args, controller.signal, endpoint, token));
         return () => { dispose(); controller.abort(); };
       }, []);
       return h('div', { className: 'llmd-wb-host' }, h('style', null, styles), h('div', { ref: root, className: 'llmd-wb-host__root' }));
