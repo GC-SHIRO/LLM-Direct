@@ -56,11 +56,17 @@ class RealSenseCameras:
             frames = self._align.process(frames)
             color = np.asanyarray(frames.get_color_frame().get_data()).copy()
             depth = np.asanyarray(frames.get_depth_frame().get_data()).copy()
+        if config.CAMERA_ROTATE.get(name, 0) == 180:
+            color = np.ascontiguousarray(color[::-1, ::-1])
+            depth = np.ascontiguousarray(depth[::-1, ::-1])
         self._last_depth[name] = (depth, time.monotonic())
         return color
 
     def depth_point(self, name: str, u: int, v: int) -> dict:
-        """3D point (mm) in the camera frame at pixel (u, v) of the last read frame."""
+        """3D point (mm) in the physical camera (sensor) frame at pixel (u, v) of the displayed image.
+
+        For a 180°-rotated camera the sensor's x/y axes point left/up in the displayed image.
+        """
         if name not in self._last_depth:
             self.read(name)
         depth, t = self._last_depth[name]
@@ -74,7 +80,9 @@ class RealSenseCameras:
         if patch.size == 0:
             return {"camera": name, "u": u, "v": v, "valid": False}
         z_m = float(np.median(patch)) * scale
-        x, y, z = self._rs.rs2_deproject_pixel_to_point(intr, [float(u), float(v)], z_m)
+        # (u, v) are in the displayed (possibly rotated) image; deproject in sensor pixel coordinates.
+        su, sv = (w - 1 - u, h - 1 - v) if config.CAMERA_ROTATE.get(name, 0) == 180 else (u, v)
+        x, y, z = self._rs.rs2_deproject_pixel_to_point(intr, [float(su), float(sv)], z_m)
         return {"camera": name, "u": u, "v": v, "valid": True,
                 "point_mm": [round(x * 1000, 1), round(y * 1000, 1), round(z * 1000, 1)],
                 "frame_age_s": round(time.monotonic() - t, 3)}

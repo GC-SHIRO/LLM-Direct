@@ -30,7 +30,9 @@ class ArmConfig:
 LEFT = ArmConfig(
     name="left",
     ip="192.168.5.1",
-    gripper_port="/dev/ttyUSB1",
+    # Stable path by FTDI serial number (ttyUSBn numbering can change on replug).
+    # Verified 2026-11-20 by PING: ID 21 answers on this adapter (was ttyUSB0).
+    gripper_port="/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG02X8MK-if00-port0",
     gripper_id=21,
     wrist_camera="left_wrist",
     reset_joints_deg=(-90.0, 0.0, -90.0, 0.0, 90.0, 90.0),
@@ -41,7 +43,8 @@ LEFT = ArmConfig(
 RIGHT = ArmConfig(
     name="right",
     ip="192.168.5.2",
-    gripper_port="/dev/ttyUSB0",
+    # Verified 2026-11-20 by PING: ID 22 answers on this adapter (was ttyUSB1).
+    gripper_port="/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BH0080MC-if00-port0",
     gripper_id=22,
     wrist_camera="right_wrist",
     reset_joints_deg=(90.0, 0.0, 90.0, 0.0, -90.0, -90.0),
@@ -58,6 +61,8 @@ CAMERAS = {
     "right_wrist": "412622271417",
 }
 CAMERA_ORDER = ("top", "left_wrist", "right_wrist")
+# Image rotation applied right after capture (degrees, 0 or 180). The top camera is mounted upside down.
+CAMERA_ROTATE = {"top": 180, "left_wrist": 0, "right_wrist": 0}
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30

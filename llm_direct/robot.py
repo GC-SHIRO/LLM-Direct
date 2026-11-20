@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from . import config
-from .dobot import FAULT_MODES, MODE_IDLE, MODE_NAMES, DobotArm, DobotError
+from .dobot import FAULT_MODES, MODE_IDLE, MODE_NAMES, MODE_RUNNING, DobotArm, DobotError
 
 MODES = ("dry_run", "supervised", "auto")
 
@@ -60,6 +60,8 @@ class Robot:
         for g in self.grippers.values():
             g.connect()
         self.cameras.connect()
+        if self.mode == "dry_run":
+            return  # read-only: do not change any controller setting
         for name, arm in self.arms.items():
             if enable:
                 arm.enable(self.safety.speed_factor)
@@ -116,7 +118,7 @@ class Robot:
         else:
             out.update({
                 "robot_mode": MODE_NAMES.get(fb.robot_mode, str(fb.robot_mode)),
-                "moving": fb.robot_mode != MODE_IDLE,
+                "moving": fb.robot_mode == MODE_RUNNING,
                 "tcp_pose": {"x": round(fb.tcp_pose[0], 2), "y": round(fb.tcp_pose[1], 2), "z": round(fb.tcp_pose[2], 2),
                              "rx": round(fb.tcp_pose[3], 2), "ry": round(fb.tcp_pose[4], 2), "rz": round(fb.tcp_pose[5], 2)},
                 "joints_deg": [round(j, 2) for j in fb.joints_deg],

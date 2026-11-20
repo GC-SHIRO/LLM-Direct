@@ -254,6 +254,15 @@ def operate_xtrainer(task: str = ""):
 
 # ---------------------------------------------------------------- main
 def _lan_addresses() -> list[str]:
+    import subprocess
+
+    try:  # Linux: hostname -I lists every interface address
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2).stdout.split()
+        addrs = [a for a in out if a.count(".") == 3 and not a.startswith("127.")]
+        if addrs:
+            return addrs
+    except (OSError, subprocess.SubprocessError):
+        pass
     try:
         infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
         return sorted({i[4][0] for i in infos if not i[4][0].startswith("127.")})
