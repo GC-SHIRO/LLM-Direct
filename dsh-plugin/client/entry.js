@@ -7,20 +7,20 @@ window.__ModuleLoader__.load({
     const kind = '@local/dsh-llm-direct-workbench';
     const namespace = 'llmDirectWorkbench';
     const copy = {
-      en: { title: 'Robot Workbench', description: 'Inspect and operate the simulated X-Trainer' },
-      zh: { title: '机器人工作台', description: '查看和操作模拟 X-Trainer' },
+      en: { title: 'Robot Workbench', description: 'Inspect X-Trainer snapshots and telemetry; manual control is optional' },
+      zh: { title: '机器人工作台', description: '查看 X-Trainer 快照与状态，可选择启用手动控制' },
     };
     function icon({ size = 16 } = {}) {
       return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true },
         h('rect', { x: 4, y: 7, width: 16, height: 12, rx: 3 }),
         h('path', { d: 'M12 3v4M8 12h1m6 0h1m-7 3h6M2 12v3m20-3v3' }));
     }
-    async function call(tool, args, signal, endpoint, token) {
+    async function call(tool, args, signal, endpoint, token, manual) {
       const path = 'api/llm-direct-workbench/call';
       const transport = globalThis.__DSH_TRANSPORT__;
       const init = {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ tool, args, ...(endpoint == null ? {} : { endpoint, ...(token ? { token } : {}) }) }), signal: AbortSignal.any([signal, AbortSignal.timeout(48_000)]),
+        body: JSON.stringify({ tool, args, ...(endpoint == null ? {} : { endpoint, ...(token ? { token } : {}), ...(manual === true ? { manual: true } : {}) }) }), signal: AbortSignal.any([signal, AbortSignal.timeout(48_000)]),
       };
       const response = transport?.fetch
         ? await transport.fetch(path, init)
@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
       const root = useRef(null);
       useEffect(() => {
         const controller = new AbortController();
-        const dispose = mountWorkbench(root.current, (tool, args, endpoint, token) => call(tool, args, controller.signal, endpoint, token));
+        const dispose = mountWorkbench(root.current, (tool, args, endpoint, token, manual) => call(tool, args, controller.signal, endpoint, token, manual));
         return () => { dispose(); controller.abort(); };
       }, []);
       return h('div', { className: 'llmd-wb-host' }, h('style', null, styles), h('div', { ref: root, className: 'llmd-wb-host__root' }));

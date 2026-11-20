@@ -103,11 +103,58 @@ async function readResult(response, id, limit) {
   throw new Error('远程 SSE 流未返回对应结果');
 }
 
-export async function remoteRead(endpoint, tool, args, signal, token) {
+const reads = new Set(['get_state', 'get_images']);
+const commands = new Set(['move_relative', 'gripper', 'move_to_named', 'stop']);
+export const isRemoteRead = tool => reads.has(tool);
+export const isRemoteCommand = tool => commands.has(tool);
+const invalidArgs = () => Object.assign(new Error('Invalid manual command arguments'), { status: 400 });
+
+function commandArgs(tool, args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) throw invalidArgs();
+  const keys = Object.keys(args);
+  if (tool === 'stop') {
+    if (keys.length !== 1 || args.arm !== 'both') throw invalidArgs();
+    return { arm: 'both' };
+  }
+  if (!['left', 'right'].includes(args.arm) || ('with_image' in args && typeof args.with_image !== 'boolean')) throw invalidArgs();
+  const fields = keys.filter(k => k !== 'arm' && k !== 'with_image');
+  if (fields.length !== 1) throw invalidArgs();
+  const k = fields[0], v = args[k];
+  if (!(tool === 'move_relative' && ['dx', 'dy', 'dz'].includes(k) && [-5, 5].includes(v)) &&
+      !(tool === 'gripper' && k === 'opening' && [0, 1].includes(v)) &&
+      !(tool === 'move_to_named' && k === 'pose' && v === 'reset')) throw invalidArgs();
+  return { arm: args.arm, [k]: v, with_image: args.with_image ?? true };
+}
+
+function jsonData(raw) {
+  const text = raw.content.find(b => b?.type === 'text')?.text;
+  let data;
+  try { data = JSON.parse(text); } catch { /* Don't expose arbitrary remote text in parse errors. */ }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid MCP tool data');
+  return data;
+}
+function verifiedState(raw, arm = 'both') {
+  const data = jsonData(raw);
+  const names = arm === 'both' ? ['left', 'right'] : [arm];
+  if (data.ok !== true || typeof data.mock !== 'boolean' || !['auto', 'dry_run', 'supervised'].includes(data.mode) ||
+      !names.every(n => data.arms?.[n]?.arm === n)) throw new Error('Unverified LLM-Direct state');
+  return data;
+}
+function imageResult(raw) {
+  const b = raw.content.find(b => b?.type === 'image' && b.mimeType === 'image/jpeg');
+  if (typeof b?.data !== 'string' || !b.data.startsWith('/9j/') || b.data.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b.data)) throw new Error('Invalid remote JPEG');
+  return `data:image/jpeg;base64,${b.data}`;
+}
+
+// Reject rather than queue. Reserve stop capacity separately from reads/motion.
+let readers = 0, moving = false, stopping = false, stopEpoch = 0;
+export async function remoteCall(endpoint, tool, args, signal, token, manual) {
   if (token !== undefined && (typeof token !== 'string' || !/^[\x21-\x7e]{1,1024}$/.test(token))) throw new Error('Invalid remote token');
   const url = destination(endpoint);
-  const parameters = readArgs(tool, args);
-  const deadline = AbortSignal.timeout(12000);
+  const reading = reads.has(tool), stop = tool === 'stop';
+  if (!reading && (!commands.has(tool) || manual !== true || !token)) throw Object.assign(new Error('Explicit manual command and bearer token required'), { status: 403 });
+  const parameters = reading ? readArgs(tool, args) : commandArgs(tool, args);
+  const deadline = AbortSignal.timeout(reading || stop ? 12000 : 90000);
   const active = signal ? AbortSignal.any([signal, deadline]) : deadline;
   let session, version;
   const headers = () => ({ accept, ...(token && { authorization: `Bearer ${token}` }), ...(session && { 'mcp-session-id': session }), ...(version && { 'mcp-protocol-version': version }) });
@@ -124,22 +171,35 @@ export async function remoteRead(endpoint, tool, args, signal, token) {
       return await readResult(res, id, method === 'initialize' ? 256 * 1024 : maxBytes);
     } finally { res.destroy(); }
   }
+  async function invoke(name, parameters, id) {
+    const raw = await post('tools/call', { name, arguments: parameters }, id);
+    if (raw.isError || !Array.isArray(raw.content)) throw new Error('Remote MCP tool failed');
+    return raw;
+  }
+  if (reading ? readers >= 4 : stop ? stopping : moving || stopping) throw Object.assign(new Error('Remote request busy; not queued'), { status: 409 });
+  if (reading) readers++; else if (stop) { stopping = true; stopEpoch++; } else moving = true;
+  const epoch = stopEpoch;
   try {
-    const init = await post('initialize', { protocolVersion: versions[0], capabilities: {}, clientInfo: { name: 'dsh-read-only', version: '1.0' } }, 1);
+    const init = await post('initialize', { protocolVersion: versions[0], capabilities: {}, clientInfo: { name: 'dsh-workbench', version: '1.0' } }, 1);
+    if (init.serverInfo?.name !== 'llm-direct') throw new Error('Not an LLM-Direct server');
     if (!versions.includes(init.protocolVersion)) throw new Error('远程 MCP 协议版本不受支持');
     version = init.protocolVersion;
     await post('notifications/initialized');
-    const raw = await post('tools/call', { name: tool, arguments: parameters }, 2);
-    if (raw.isError || !Array.isArray(raw.content)) throw new Error('远程读取失败');
-    if (tool === 'get_state') {
-      const block = raw.content.find(b => b?.type === 'text');
-      const data = JSON.parse(block?.text);
-      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('远程状态格式无效');
-      return { data };
+    if (!reading && !session) throw new Error('Manual commands require a stateful MCP session');
+    const stateArgs = tool === 'get_state' ? parameters : { arm: 'both' };
+    const state = verifiedState(await invoke('get_state', stateArgs, 2), stateArgs.arm);
+    if (tool === 'get_state') return { endpoint, data: state };
+    if (tool === 'get_images') return { endpoint, image: imageResult(await invoke(tool, parameters, 3)) };
+    if (!(state.mode === 'supervised' || (state.mock && state.mode === 'auto') || (!state.mock && stop))) {
+      throw Object.assign(new Error('Manual command not allowed in this target mode'), { status: 403 });
     }
-    const block = raw.content.find(b => b?.type === 'image' && b.mimeType === 'image/jpeg');
-    if (typeof block?.data !== 'string' || !block.data.length || block.data.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(block.data)) throw new Error('远程图像格式无效');
-    return { image: `data:image/jpeg;base64,${block.data}` };
+    if (!stop && epoch !== stopEpoch) throw Object.assign(new Error('Cancelled by stop before dispatch'), { status: 409 });
+    // Only one dispatch. After dispatch any failure leaves the outcome unknown.
+    try {
+      const raw = await invoke(tool, parameters, 3), data = jsonData(raw);
+      if (typeof data.ok !== 'boolean') throw new Error('Invalid command result');
+      return { endpoint, data, ...(raw.content.some(b => b?.type === 'image') && { image: imageResult(raw) }) };
+    } catch { throw new Error('Remote command outcome unknown; not retried. Inspect target state.'); }
   } finally {
     // A caller abort must not strand a session or turn cleanup into an
     // unbounded wait. Terminate the transport only; never issue robot stop.
@@ -147,5 +207,8 @@ export async function remoteRead(endpoint, tool, args, signal, token) {
       try { (await request(url, 'DELETE', headers(), undefined, AbortSignal.timeout(1500))).destroy(); }
       catch { /* Best effort: a disconnected server may not be reachable. */ }
     }
+    if (reading) readers--; else if (stop) stopping = false; else moving = false;
   }
 }
+
+export const remoteRead = (endpoint, tool, args, signal, token) => remoteCall(endpoint, tool, args, signal, token);

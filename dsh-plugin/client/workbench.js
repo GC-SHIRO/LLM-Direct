@@ -21,14 +21,19 @@ const COPY = {
   settings: ['工作台设置', 'Workbench settings'], done: ['完成', 'Done'], defaults: ['恢复默认', 'Reset defaults'],
   theme: ['面板外观', 'Appearance'], system: ['跟随系统', 'System'], light: ['浅色', 'Light'], dark: ['深色', 'Dark'],
   precision: ['读数小数位', 'Telemetry decimals'], interval: ['状态轮询间隔', 'Status poll interval'],
-  connection: ['连接目标', 'Connection target'], local: ['本地模拟', 'Local mock'], remote: ['远程（只读）', 'Remote (read-only)'],
+  connection: ['连接目标', 'Connection target'], local: ['本地模拟', 'Local mock'], remote: ['远程', 'Remote'],
   token: ['访问令牌（仅本次）', 'Access token (not saved)'], address: ['远程地址', 'Remote address'], applyConnection: ['应用连接', 'Apply connection'],
   connectionNote: ['新面板从本地模拟开始。点击“应用连接”才会切换当前面板。', 'New panes start on the local mock. Apply to switch this pane only.'],
-  targetLabel: ['当前目标', 'Active target'], readOnly: ['远程只读：仅查看状态和画面，无法控制或停止机械臂。', 'Remote is read-only: state and cameras only. Motion and stop are disabled.'],
+  targetLabel: ['当前目标', 'Active target'], readOnly: ['远程只读：手动控制和停止均未启用。', 'Remote is read-only. Manual controls and stop are disabled.'],
+  manual: ['启用远程手动控制（仅此面板）', 'Enable remote manual control for this pane'], armed: ['手动控制已启用', 'Manual control enabled'],
+  manualNote: ['应用地址和令牌并验证状态后才能启用。实机仅限人工确认模式；停止不受模式限制。', 'Apply the address and token, then verify status before enabling. Real motion requires supervised mode; stop works in any mode.'],
+  modeBlocked: ['当前模式只可停止。模拟需自动或人工确认模式；实机需人工确认模式。', 'Stop only in this mode. Mock motion requires auto or supervised; real motion requires supervised.'],
+  hostMismatch: ['远程目标不匹配；已丢弃响应。请重启 DeepSeek Harness（DSH）以加载新版工作台插件，然后刷新。', 'Remote endpoint mismatch; response discarded. Restart DeepSeek Harness (DSH) to load the updated workbench plugin, then refresh.'],
+  cameraPoll: ['轮询时刷新相机快照', 'Include camera snapshots when polling'], snapshotLabel: ['快照（非直播）', 'Snapshot (not live)'], 
   invalidAddress: ['请输入完整的 http(s):// 地址，路径为 /mcp，不含凭据、查询或片段。', 'Enter a full http(s):// address with path /mcp and no credentials, query or fragment.'],
   realConnected: ['实机已连接', 'Real robot connected'], remoteNoState: ['未收到有效的实机或模拟状态', 'No valid real or mock status returned'],
-  preferencesNote: ['仅保存在本机；不会改变机械臂动作。', 'Saved on this device. Does not change robot motion.'],
-  pollNote: ['仅在开启轮询时生效，不刷新相机。', 'Only when polling is on. Cameras are not refreshed.'],
+  preferencesNote: ['显示偏好保存在本机。令牌与手动控制开关不会保存。', 'Display preferences are saved on this device. Tokens and manual enable are not saved.'],
+  pollNote: ['选中时立即获取快照；开启轮询后按此间隔刷新，非视频流。', 'Select to fetch a snapshot now. With polling on, snapshots refresh at this interval; this is not a video stream.'],
 };
 const AXES = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
 const JOG_MM = 5;
@@ -103,13 +108,15 @@ export function mountWorkbench(root, call) {
         <label><span data-i18n="address"></span><input type="url" data-endpoint placeholder="http://192.168.1.50:8765/mcp" autocomplete="off" spellcheck="false"></label>
         <label><span data-i18n="token"></span><input type="password" data-token maxlength="1024" autocomplete="off" spellcheck="false"></label>
         <p class="llmd-wb__hint" data-i18n="connectionNote"></p>
-        <p class="llmd-wb__hint" data-i18n="readOnly"></p>
+        <label><span data-i18n="manual"></span><input type="checkbox" data-manual></label>
+        <p class="llmd-wb__hint" data-i18n="manualNote"></p>
         <p role="status" data-kind="error" data-out="address-error"></p>
         <button type="button" data-action="apply-connection" data-i18n="applyConnection"></button>
       </fieldset>
       <label><span data-i18n="theme"></span><select data-pref="theme">${OPTIONS.theme.map(v => `<option value="${v}" data-i18n="${v}"></option>`).join('')}</select></label>
       <label><span data-i18n="precision"></span><select data-pref="precision">${OPTIONS.precision.map(v => `<option>${v}</option>`).join('')}</select></label>
       <label><span data-i18n="interval"></span><select data-pref="interval">${OPTIONS.interval.map(v => `<option value="${v}">${Number(v)/1000} s</option>`).join('')}</select></label>
+      <label><span data-i18n="cameraPoll"></span><input type="checkbox" data-camera-poll></label>
       <p class="llmd-wb__hint" data-i18n="pollNote"></p>
       <footer><button type="button" data-action="defaults" data-i18n="defaults"></button><button type="button" data-action="done" data-i18n="done"></button></footer>
     </dialog>
@@ -195,7 +202,12 @@ export function mountWorkbench(root, call) {
   let motion = null;
   let stopping = null;
   let readAfterStop = false;
-  let mockVerified = false;
+  const manualInput = dialog.querySelector('[data-manual]');
+  const cameraPoll = dialog.querySelector('[data-camera-poll]');
+  let verified = false;
+  let armed = false;
+  let unknownOutcome = false;
+  let frameAt = null;
   let snapshot = null;
   let sampleAt = null;
   const text = (key, detail = '') => detail ? `${t(key)} · ${detail}` : t(key);
@@ -243,12 +255,45 @@ export function mountWorkbench(root, call) {
     return sampleAt === null || clock.performance.now() - sampleAt >= STALE_MS;
   }
 
+  // Every remote payload, including a command acknowledgement or embedded frame,
+  // must identify its destination. Older hosts silently serve the local simulator.
+  async function request(token, tool, args, command = false) {
+    const target = endpoint;
+    const manual = command && target !== null && verified && armed && Boolean(activeToken);
+    if (command && target !== null && !manual) throw new Error('readOnly');
+    const body = await call(tool, args, target, activeToken, manual || undefined);
+    if (target !== null && body?.endpoint !== target) {
+      if (isCurrent(token)) {
+        verified = armed = false;
+        snapshot = sampleAt = frameAt = null;
+        frame.removeAttribute('src');
+        frame.hidden = true;
+        outputs['image-placeholder'].hidden = false;
+        cameraDetail = '';
+        connectionDetail = ['hostMismatch'];
+      }
+      throw new Error('hostMismatch');
+    }
+    return body;
+  }
+
+  function canArm() {
+    return endpoint !== null && verified && Boolean(activeToken) && !isStale() && !connectionDetail.length &&
+      modeInput.value === 'remote' && remoteAddress(addressInput.value) === endpoint && !tokenInput.value && !unknownOutcome;
+  }
+
+  function canStop() {
+    return !stopping && verified && (endpoint === null || (armed && Boolean(activeToken)));
+  }
+
   function moveBlock(arm) {
-    if (endpoint !== null) return t('readOnly');
+    if (endpoint !== null && !armed) return t('readOnly');
     if (stopping) return t('stopping');
     if (motion) return t('busy');
-    if (!mockVerified || connectionDetail.length || !snapshot) return t('needMock');
+    if (unknownOutcome) return t('unknown');
+    if (!verified || connectionDetail.length || !snapshot) return t(endpoint === null ? 'needMock' : 'unverified');
     if (isStale()) return t('stale');
+    if (endpoint !== null && !(snapshot.mode === 'supervised' || (snapshot.mock && snapshot.mode === 'auto'))) return t('modeBlocked');
     const state = snapshot.arms[arm];
     if (state?.fault || state?.error) return `${t(arm)}: ${state.fault || state.error}`;
     if (!state?.tcp_pose || state.moving !== false) return `${t(arm)} · ${t('notReady')}`;
@@ -257,7 +302,9 @@ export function mountWorkbench(root, call) {
 
   function render() {
     const busy = Boolean(motion || stopping);
-    const target = endpoint === null ? t('local') : `${t('remote')} · ${endpoint}`;
+    manualInput.checked = armed;
+    manualInput.disabled = busy || (!armed && !canArm());
+    const target = endpoint === null ? t('local') : `${t('remote')} · ${endpoint}${armed ? ` · ${t('armed')}` : ''}`;
     output('target', target);
     output('active-target', `${t('targetLabel')}: ${target}`);
     output('address-error', addressError ? t('invalidAddress') : '');
@@ -280,7 +327,8 @@ export function mountWorkbench(root, call) {
     }
     outputs.status.dataset.kind = kind;
     output('status', status);
-    const oldFrame = !frame.hidden && (cameraDetail || connectionDetail.length || (!busy && snapshot && isStale()));
+    const oldFrame = !frame.hidden && (cameraDetail || connectionDetail.length || clock.performance.now() - frameAt >= STALE_MS);
+    frame.title = t('snapshotLabel');
     output('camera', [cameraDetail ? text('cameraFailed', detailText(cameraDetail)) : '', oldFrame ? t('previous') : ''].filter(Boolean).join(' · '));
     renderFeedback();
     for (const arm of ARMS) {
@@ -295,8 +343,8 @@ export function mountWorkbench(root, call) {
     for (const button of moveButtons) button.disabled = Boolean(reason);
     output('motion-hint', reason || t('jogHint'));
     refreshButton.disabled = busy || observation?.full === true;
-    // Retain an out-of-band stop path if a previously verified mock connection drops.
-    stopButton.disabled = Boolean(endpoint !== null || stopping || !mockVerified);
+    // Stop remains available during motion, stale telemetry or an unknown outcome.
+    stopButton.disabled = !canStop();
   }
 
   function showFrame(image) {
