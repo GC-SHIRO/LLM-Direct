@@ -38,7 +38,7 @@ Immediate stop. Always allowed, never refused.
 | `reason` contains | Meaning | Do |
 |---|---|---|
 | `step exceeds` | move too large | split into ≤ 50 mm / ≤ 15° steps |
-| `outside workspace` | target leaves the allowed box | choose another route or ask the user |
+| `outside workspace` | target leaves the allowed box (x −420…400, y −560…−170, z 255…650) | choose another route; for z, the target is too low (fingertips would reach the foam) |
 | `not configured` | the server has no workspace limits for this arm | tell the user; Cartesian moves are unavailable |
 | `no inverse-kinematics solution` | pose unreachable | change orientation or approach from another side |
 | `more than 200 mm away` | absolute target too far | approach with relative steps first |

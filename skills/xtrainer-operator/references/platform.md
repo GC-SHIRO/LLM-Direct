@@ -2,7 +2,8 @@
 
 ## Overall layout
 
-- A rectangular base plate **1400 × 1000 mm**. A sheet of EVA foam lies in the centre: this is the **work area**. Objects are normally placed on the foam.
+- A rectangular base plate **1400 × 1000 mm**. A **700 × 700 × 50 mm EVA foam pad** lies in the centre, between the two arms: this is the **work area**. Objects are normally placed on the foam.
+- The two arm bases stand about **1064 mm apart**, facing each other across the foam; each base is about 170 mm from the near edge of the foam.
 - **Two follower arms** (Dobot Nova 2) stand on the base, mounted **mirror-symmetrically**, one on each side of the work area:
   - `left` = follower 1 (controller 192.168.5.1); its wrist camera is `left_wrist`.
   - `right` = follower 2 (controller 192.168.5.2); its wrist camera is `right_wrist`.
@@ -30,7 +31,7 @@ Reachability is better near the middle of the reach. Poses near full stretch (�
 
 - One parallel two-finger gripper on each arm's flange, driven by a serial servo.
 - Opening range 0–95 mm, commanded as **0.0 = closed, 1.0 = fully open**.
-- The fingertips are some distance beyond the reported flange position along the tool axis; judge their position from the wrist image (the fingers are visible at the bottom of the wrist view).
+- The fingertips are about **197 mm beyond the reported flange position** along the tool axis (see motion.md, Heights). The fingers are visible at the bottom of the wrist view.
 - No force sensor. A closing gripper that stops early (`likely_holding_object: true`) is the only grip signal.
 
 ## Cameras (Intel RealSense D405, 640 × 480, colour + depth)

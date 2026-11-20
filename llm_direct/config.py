@@ -37,7 +37,7 @@ LEFT = ArmConfig(
     wrist_camera="left_wrist",
     reset_joints_deg=(-90.0, 0.0, -90.0, 0.0, 90.0, 90.0),
     reset_gripper=1.0,
-    workspace_mm=None,  # TODO: measure on the real robot
+    workspace_mm=None,  # set below from the CAD model
 )
 
 RIGHT = ArmConfig(
@@ -49,8 +49,19 @@ RIGHT = ArmConfig(
     wrist_camera="right_wrist",
     reset_joints_deg=(90.0, 0.0, 90.0, 0.0, -90.0, -90.0),
     reset_gripper=1.0,
-    workspace_mm=None,  # TODO: measure on the real robot
+    workspace_mm=None,  # set below from the CAD model
 )
+
+# Workspace from the CAD model (measurements/cad_geometry.md), same for both arms in their own base frame:
+# foam footprint, own half of the table, flange high enough that vertical fingertips stay above the foam.
+CAD_WORKSPACE_MM = (-420.0, 400.0, -560.0, -170.0, 255.0, 650.0)
+LEFT = ArmConfig(**{**LEFT.__dict__, "workspace_mm": CAD_WORKSPACE_MM})
+RIGHT = ArmConfig(**{**RIGHT.__dict__, "workspace_mm": CAD_WORKSPACE_MM})
+
+# Design geometry (CAD), used in the operator skill and docs.
+GRIPPER_LENGTH_MM = 197.0  # flange face -> fingertips
+FOAM_TOP_Z_MM = 42.0  # foam top surface in each arm's base frame
+FINGERTIP_TOUCH_FLANGE_Z_MM = FOAM_TOP_Z_MM + GRIPPER_LENGTH_MM  # ~239, gripper vertical
 
 ARM_CONFIGS = {"left": LEFT, "right": RIGHT}
 

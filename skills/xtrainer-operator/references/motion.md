@@ -3,9 +3,11 @@
 ## Coordinate frames
 
 - Every arm uses **its own base frame**. Positions are in **mm**, orientations (`rx, ry, rz`) in **degrees**.
-- `+z` points **up**, away from the table, for both arms. This is the one direction you can rely on without the guide.
-- `x` and `y` lie in the table plane. Because the arms are mirrored, **the same axis can point in different (often opposite) directions in the images for the left and the right arm.** Never transfer a direction learned on one arm to the other.
-- Poses from the two arms are **not comparable** (different frames). To relate them, use the images, not the numbers.
+- Origin: the centre of the arm's base, on the mounting surface.
+- `+z` points **up**, away from the table, for both arms.
+- `−y` points from the arm's base **towards the table centre and the other arm** (both arms). The foam starts about 170 mm from the base (y ≈ −170) and the table centre line is at y ≈ −530. The other arm's base is about 1064 mm away along −y.
+- `x` runs along the table edge between the operator side and the back. The two arms face each other, so **+x points in opposite world directions for the left and the right arm.** Check +x in the motion guide or with a 10 mm move; never transfer an x direction from one arm to the other.
+- Poses from the two arms are **not directly comparable** (different frames: the other arm's frame is turned 180°). To relate them, use the images or the geometry above.
 - `drx, dry, drz` in `move_relative` rotate the gripper about the base-frame axes, keeping the flange position. `drz` turns the gripper about the vertical axis; use it to align the fingers with an object's edges.
 
 ## Learning the directions: the motion guide
@@ -35,4 +37,12 @@ Turning image directions into commands: to bring the gripper towards an object t
 - Robot state updates every ~8 ms; `get_state` is always fresh.
 - The gripper takes roughly 0.2–1 s to open or close.
 - `stop()` halts the arm with a short braking distance (a few mm at this speed).
-- Table height is not given in numbers: judge the gripper's height above the table from the images, and keep a generous clearance (about 100 mm) when travelling sideways.
+
+## Heights (design values from the CAD model)
+
+- Foam top surface: z ≈ 42 mm (both arms).
+- Gripper length, flange to fingertips: ≈ 197 mm. `tcp_pose` is the flange, not the fingertips.
+- With the gripper pointing straight down (rx ≈ ±180, ry ≈ 0): **fingertip height above the foam ≈ z − 239 mm.** Example: z = 360 → fingertips about 120 mm above the foam.
+- The server refuses flange z below 255 (fingertips ≈ 15 mm above the foam when vertical), so objects thinner than about 15 mm cannot be reached from straight above. Height of an object: estimate it from the images and subtract from the fingertip height.
+- Travel sideways at z ≥ 340 (fingertips ≈ 100 mm above the foam).
+- Allowed flange box for each arm: x −420…400, y −560…−170 (own half of the table), z 255…650. Moves outside it are refused.
