@@ -29,7 +29,7 @@ const COPY = {
   manualNote: ['应用地址和令牌并验证状态后才能启用。实机仅限人工确认模式；停止不受模式限制。', 'Apply the address and token, then verify status before enabling. Real motion requires supervised mode; stop works in any mode.'],
   modeBlocked: ['当前模式只可停止。模拟需自动或人工确认模式；实机需人工确认模式。', 'Stop only in this mode. Mock motion requires auto or supervised; real motion requires supervised.'],
   hostMismatch: ['远程目标不匹配；已丢弃响应。请重启 DeepSeek Harness（DSH）以加载新版工作台插件，然后刷新。', 'Remote endpoint mismatch; response discarded. Restart DeepSeek Harness (DSH) to load the updated workbench plugin, then refresh.'],
-  cameraPoll: ['轮询时刷新相机快照', 'Include camera snapshots when polling'], snapshotLabel: ['快照（非直播）', 'Snapshot (not live)'], 
+  cameraPoll: ['轮询时刷新相机快照', 'Include camera snapshots when polling'], snapshotLabel: ['快照（非直播）', 'Snapshot (not live)'],
   invalidAddress: ['请输入完整的 http(s):// 地址，路径为 /mcp，不含凭据、查询或片段。', 'Enter a full http(s):// address with path /mcp and no credentials, query or fragment.'],
   realConnected: ['实机已连接', 'Real robot connected'], remoteNoState: ['未收到有效的实机或模拟状态', 'No valid real or mock status returned'],
   preferencesNote: ['显示偏好保存在本机。令牌与手动控制开关不会保存。', 'Display preferences are saved on this device. Tokens and manual enable are not saved.'],
@@ -44,6 +44,7 @@ function normalizePrefs(value) {
   return Object.fromEntries(Object.entries(OPTIONS).map(([key, allowed]) => [key, allowed.includes(value?.[key]) ? value[key] : DEFAULT_PREF[key]]));
 }
 const CONNECTION_KEY = 'llm-direct-workbench.connection.v1';
+const CAMERA_KEY = 'llm-direct-workbench.camera.v1';
 function remoteAddress(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!/^https?:\/\/[^\s/@?#\\]+\/mcp$/i.test(raw)) return null;
@@ -223,7 +224,9 @@ export function mountWorkbench(root, call) {
 
   function schedulePoll() {
     clock.clearInterval(pollTimer);
-    if (polling.checked) pollTimer = clock.setInterval(() => void refresh(false), Number(prefs.interval));
+    if (polling.checked) pollTimer = clock.setInterval(() => {
+      if (!observation) void refresh(cameraPoll.checked);
+    }, Number(prefs.interval));
   }
 
   function output(key, value) {
@@ -277,6 +280,7 @@ export function mountWorkbench(root, call) {
     return body;
   }
 
+  // Arming is explicit consent, not a mode: mode gating happens per command.
   function canArm() {
     return endpoint !== null && verified && Boolean(activeToken) && !isStale() && !connectionDetail.length &&
       modeInput.value === 'remote' && remoteAddress(addressInput.value) === endpoint && !tokenInput.value && !unknownOutcome;
@@ -307,7 +311,7 @@ export function mountWorkbench(root, call) {
     const target = endpoint === null ? t('local') : `${t('remote')} · ${endpoint}${armed ? ` · ${t('armed')}` : ''}`;
     output('target', target);
     output('active-target', `${t('targetLabel')}: ${target}`);
-    output('address-error', addressError ? t('invalidAddress') : '');
+    output('address-error', addressError ? t('invalidAddress') : connectionDetail[0] === 'hostMismatch' ? t('hostMismatch') : '');
     applyButton.disabled = busy;
     modeInput.disabled = busy;
     addressInput.disabled = tokenInput.disabled = busy || modeInput.value !== 'remote';
@@ -350,23 +354,24 @@ export function mountWorkbench(root, call) {
   function showFrame(image) {
     if (typeof image !== 'string' || !/^data:image\/jpeg;base64,[a-z0-9+/=]+$/i.test(image)) return false;
     if (frame.getAttribute('src') !== image) frame.setAttribute('src', image);
+    frameAt = clock.performance.now();
     frame.hidden = false;
     outputs['image-placeholder'].hidden = true;
     cameraDetail = '';
     return true;
   }
 
-  async function refresh(full) {
-    if (disposed || motion || stopping || (!full && observation) || observation?.full) return;
+  async function refresh(full, acknowledgeUnknown = false) {
+    if (disposed || motion || stopping || (unknownOutcome && !acknowledgeUnknown) || (!full && observation) || observation?.full) return;
     const token = invalidateObservation();
     observation = { full };
     const startedAt = clock.performance.now();
     render();
     try {
-      const { data } = await call('get_state', { arm: 'both' }, endpoint, activeToken);
+      const { data } = await request(token, 'get_state', { arm: 'both' });
       if (!isCurrent(token)) return;
       if (endpoint === null && data?.mock === false) {
-        mockVerified = false;
+        verified = armed = false;
         snapshot = null;
         frame.removeAttribute('src');
         frame.hidden = true;
@@ -378,21 +383,23 @@ export function mountWorkbench(root, call) {
       if (data?.ok !== true || typeof data.mock !== 'boolean' || !data.arms?.left || !data.arms?.right) {
         throw new Error(data?.reason || (endpoint === null ? 'noState' : 'remoteNoState'));
       }
-      mockVerified = endpoint === null && data.mock;
+      if (snapshot && snapshot.mock !== data.mock) armed = false;
+      verified = true;
+      unknownOutcome = false;
       snapshot = data;
       sampleAt = startedAt;
       connectionDetail = [];
       render();
       if (full) {
         try {
-          const { image } = await call('get_images', { grid: false }, endpoint, activeToken);
+          const { image } = await request(token, 'get_images', { grid: false });
           if (isCurrent(token) && !showFrame(image)) throw new Error('noImage');
         } catch (error) {
           if (isCurrent(token)) cameraDetail = errorText(error);
         }
       }
     } catch (error) {
-      if (isCurrent(token)) {
+      if (isCurrent(token) && errorText(error) !== 'hostMismatch') {
         connectionDetail = ['disconnected', errorText(error)];
         sampleAt = null;
       }
@@ -420,7 +427,7 @@ export function mountWorkbench(root, call) {
     feedback('busy', '', label);
     render();
     try {
-      const { data, image } = await call(tool, args, endpoint);
+      const { data, image } = await request(token, tool, args, true);
       if (!isCurrent(token)) return;
       if (data?.ok === true) {
         const outcome = data.dry_run || data.arms?.[args.arm]?.dry_run ? 'dryResult' : 'success';
@@ -434,7 +441,9 @@ export function mountWorkbench(root, call) {
       observeAfter = true;
     } catch (error) {
       if (isCurrent(token)) {
-        connectionDetail = ['unverified', errorText(error)];
+        // The command may have reached the robot. Don't retry or unlock by polling.
+        unknownOutcome = true;
+        if (errorText(error) !== 'hostMismatch') connectionDetail = ['unverified', errorText(error)];
         feedback('unknown', 'error', label);
       }
     } finally {
@@ -448,7 +457,7 @@ export function mountWorkbench(root, call) {
   }
 
   async function stop() {
-    if (disposed || endpoint !== null || stopping || !mockVerified) return;
+    if (disposed || !canStop()) return;
     const token = invalidateObservation();
     stopping = token;
     sampleAt = null;
@@ -456,7 +465,7 @@ export function mountWorkbench(root, call) {
     feedback('stopping');
     render();
     try {
-      const { data } = await call('stop', { arm: 'both' }, endpoint);
+      const { data } = await request(token, 'stop', { arm: 'both' }, true);
       if (!isCurrent(token)) return;
       if (data?.ok === true) feedback('stopOk', 'ok');
       else if (data?.ok === false) feedback('stopFail', 'error', () => resultReason(data) || t('noDetails'));
@@ -464,7 +473,8 @@ export function mountWorkbench(root, call) {
       readAfterStop = true;
     } catch (error) {
       if (isCurrent(token)) {
-        connectionDetail = ['unverified', errorText(error)];
+        unknownOutcome = true;
+        if (errorText(error) !== 'hostMismatch') connectionDetail = ['unverified', errorText(error)];
         feedback('unknown', 'error', () => t('stop'));
       }
     } finally {
@@ -490,7 +500,7 @@ export function mountWorkbench(root, call) {
     tokenInput.value = '';
     invalidateObservation();
     endpoint = next;
-    mockVerified = false;
+    verified = armed = unknownOutcome = false;
     snapshot = sampleAt = null;
     frame.removeAttribute('src');
     frame.hidden = true;
@@ -509,8 +519,11 @@ export function mountWorkbench(root, call) {
       case 'apply-connection': applyConnection(); break;
       case 'settings': dialog.showModal(); break;
       case 'done': dialog.close(); break;
-      case 'defaults': prefs = { ...DEFAULT_PREF }; applyPrefs(true); schedulePoll(); render(); break;
-      case 'refresh': void refresh(true); break;
+      case 'defaults':
+        cameraPoll.checked = false;
+        try { clock.localStorage.removeItem(CAMERA_KEY); } catch { /* storage unavailable */ }
+        prefs = { ...DEFAULT_PREF }; applyPrefs(true); schedulePoll(); render(); break;
+      case 'refresh': void refresh(true, true); break;
       case 'jog': {
         const { axis, sign } = button.dataset;
         const delta = JOG_MM * Number(sign);
@@ -539,9 +552,19 @@ export function mountWorkbench(root, call) {
       if (key === 'interval') schedulePoll();
       render();
     }
+    if (event.target === manualInput) {
+      armed = !motion && !stopping && manualInput.checked && canArm();
+      if (manualInput.checked && !armed) feedback('readOnly', 'error');
+      render();
+    }
+    if (event.target === cameraPoll) {
+      try { clock.localStorage.setItem(CAMERA_KEY, cameraPoll.checked ? '1' : '0'); } catch { /* storage unavailable */ }
+      schedulePoll();
+      if (cameraPoll.checked) void refresh(true);
+    }
     if (event.target === polling) {
       schedulePoll();
-      if (polling.checked) void refresh(false);
+      if (polling.checked) void refresh(Boolean(cameraPoll.checked));
     }
   }
 
@@ -561,6 +584,7 @@ export function mountWorkbench(root, call) {
   panel.addEventListener('change', onChange);
   mounted.set(root, dispose);
   applyPrefs();
+  try { cameraPoll.checked = clock.localStorage.getItem(CAMERA_KEY) === '1'; } catch { /* storage unavailable */ }
   applyLanguage();
   statusTimer = clock.setInterval(render, 500);
   void refresh(true);

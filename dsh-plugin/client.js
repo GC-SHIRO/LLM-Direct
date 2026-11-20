@@ -26,14 +26,19 @@ const COPY = {
   settings: ['工作台设置', 'Workbench settings'], done: ['完成', 'Done'], defaults: ['恢复默认', 'Reset defaults'],
   theme: ['面板外观', 'Appearance'], system: ['跟随系统', 'System'], light: ['浅色', 'Light'], dark: ['深色', 'Dark'],
   precision: ['读数小数位', 'Telemetry decimals'], interval: ['状态轮询间隔', 'Status poll interval'],
-  connection: ['连接目标', 'Connection target'], local: ['本地模拟', 'Local mock'], remote: ['远程（只读）', 'Remote (read-only)'],
+  connection: ['连接目标', 'Connection target'], local: ['本地模拟', 'Local mock'], remote: ['远程', 'Remote'],
   token: ['访问令牌（仅本次）', 'Access token (not saved)'], address: ['远程地址', 'Remote address'], applyConnection: ['应用连接', 'Apply connection'],
   connectionNote: ['新面板从本地模拟开始。点击“应用连接”才会切换当前面板。', 'New panes start on the local mock. Apply to switch this pane only.'],
-  targetLabel: ['当前目标', 'Active target'], readOnly: ['远程只读：仅查看状态和画面，无法控制或停止机械臂。', 'Remote is read-only: state and cameras only. Motion and stop are disabled.'],
+  targetLabel: ['当前目标', 'Active target'], readOnly: ['远程只读：手动控制和停止均未启用。', 'Remote is read-only. Manual controls and stop are disabled.'],
+  manual: ['启用远程手动控制（仅此面板）', 'Enable remote manual control for this pane'], armed: ['手动控制已启用', 'Manual control enabled'],
+  manualNote: ['应用地址和令牌并验证状态后才能启用。实机仅限人工确认模式；停止不受模式限制。', 'Apply the address and token, then verify status before enabling. Real motion requires supervised mode; stop works in any mode.'],
+  modeBlocked: ['当前模式只可停止。模拟需自动或人工确认模式；实机需人工确认模式。', 'Stop only in this mode. Mock motion requires auto or supervised; real motion requires supervised.'],
+  hostMismatch: ['远程目标不匹配；已丢弃响应。请重启 DeepSeek Harness（DSH）以加载新版工作台插件，然后刷新。', 'Remote endpoint mismatch; response discarded. Restart DeepSeek Harness (DSH) to load the updated workbench plugin, then refresh.'],
+  cameraPoll: ['轮询时刷新相机快照', 'Include camera snapshots when polling'], snapshotLabel: ['快照（非直播）', 'Snapshot (not live)'],
   invalidAddress: ['请输入完整的 http(s):// 地址，路径为 /mcp，不含凭据、查询或片段。', 'Enter a full http(s):// address with path /mcp and no credentials, query or fragment.'],
   realConnected: ['实机已连接', 'Real robot connected'], remoteNoState: ['未收到有效的实机或模拟状态', 'No valid real or mock status returned'],
-  preferencesNote: ['仅保存在本机；不会改变机械臂动作。', 'Saved on this device. Does not change robot motion.'],
-  pollNote: ['仅在开启轮询时生效，不刷新相机。', 'Only when polling is on. Cameras are not refreshed.'],
+  preferencesNote: ['显示偏好保存在本机。令牌与手动控制开关不会保存。', 'Display preferences are saved on this device. Tokens and manual enable are not saved.'],
+  pollNote: ['选中时立即获取快照；开启轮询后按此间隔刷新，非视频流。', 'Select to fetch a snapshot now. With polling on, snapshots refresh at this interval; this is not a video stream.'],
 };
 const AXES = ['x', 'y', 'z', 'rx', 'ry', 'rz'];
 const JOG_MM = 5;
@@ -44,6 +49,7 @@ function normalizePrefs(value) {
   return Object.fromEntries(Object.entries(OPTIONS).map(([key, allowed]) => [key, allowed.includes(value?.[key]) ? value[key] : DEFAULT_PREF[key]]));
 }
 const CONNECTION_KEY = 'llm-direct-workbench.connection.v1';
+const CAMERA_KEY = 'llm-direct-workbench.camera.v1';
 function remoteAddress(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!/^https?:\/\/[^\s/@?#\\]+\/mcp$/i.test(raw)) return null;
@@ -108,13 +114,15 @@ function mountWorkbench(root, call) {
         <label><span data-i18n="address"></span><input type="url" data-endpoint placeholder="http://192.168.1.50:8765/mcp" autocomplete="off" spellcheck="false"></label>
         <label><span data-i18n="token"></span><input type="password" data-token maxlength="1024" autocomplete="off" spellcheck="false"></label>
         <p class="llmd-wb__hint" data-i18n="connectionNote"></p>
-        <p class="llmd-wb__hint" data-i18n="readOnly"></p>
+        <label><span data-i18n="manual"></span><input type="checkbox" data-manual></label>
+        <p class="llmd-wb__hint" data-i18n="manualNote"></p>
         <p role="status" data-kind="error" data-out="address-error"></p>
         <button type="button" data-action="apply-connection" data-i18n="applyConnection"></button>
       </fieldset>
       <label><span data-i18n="theme"></span><select data-pref="theme">${OPTIONS.theme.map(v => `<option value="${v}" data-i18n="${v}"></option>`).join('')}</select></label>
       <label><span data-i18n="precision"></span><select data-pref="precision">${OPTIONS.precision.map(v => `<option>${v}</option>`).join('')}</select></label>
       <label><span data-i18n="interval"></span><select data-pref="interval">${OPTIONS.interval.map(v => `<option value="${v}">${Number(v)/1000} s</option>`).join('')}</select></label>
+      <label><span data-i18n="cameraPoll"></span><input type="checkbox" data-camera-poll></label>
       <p class="llmd-wb__hint" data-i18n="pollNote"></p>
       <footer><button type="button" data-action="defaults" data-i18n="defaults"></button><button type="button" data-action="done" data-i18n="done"></button></footer>
     </dialog>
@@ -200,7 +208,12 @@ function mountWorkbench(root, call) {
   let motion = null;
   let stopping = null;
   let readAfterStop = false;
-  let mockVerified = false;
+  const manualInput = dialog.querySelector('[data-manual]');
+  const cameraPoll = dialog.querySelector('[data-camera-poll]');
+  let verified = false;
+  let armed = false;
+  let unknownOutcome = false;
+  let frameAt = null;
   let snapshot = null;
   let sampleAt = null;
   const text = (key, detail = '') => detail ? `${t(key)} · ${detail}` : t(key);
@@ -216,7 +229,9 @@ function mountWorkbench(root, call) {
 
   function schedulePoll() {
     clock.clearInterval(pollTimer);
-    if (polling.checked) pollTimer = clock.setInterval(() => void refresh(false), Number(prefs.interval));
+    if (polling.checked) pollTimer = clock.setInterval(() => {
+      if (!observation) void refresh(cameraPoll.checked);
+    }, Number(prefs.interval));
   }
 
   function output(key, value) {
@@ -248,12 +263,46 @@ function mountWorkbench(root, call) {
     return sampleAt === null || clock.performance.now() - sampleAt >= STALE_MS;
   }
 
+  // Every remote payload, including a command acknowledgement or embedded frame,
+  // must identify its destination. Older hosts silently serve the local simulator.
+  async function request(token, tool, args, command = false) {
+    const target = endpoint;
+    const manual = command && target !== null && verified && armed && Boolean(activeToken);
+    if (command && target !== null && !manual) throw new Error('readOnly');
+    const body = await call(tool, args, target, activeToken, manual || undefined);
+    if (target !== null && body?.endpoint !== target) {
+      if (isCurrent(token)) {
+        verified = armed = false;
+        snapshot = sampleAt = frameAt = null;
+        frame.removeAttribute('src');
+        frame.hidden = true;
+        outputs['image-placeholder'].hidden = false;
+        cameraDetail = '';
+        connectionDetail = ['hostMismatch'];
+      }
+      throw new Error('hostMismatch');
+    }
+    return body;
+  }
+
+  // Arming is explicit consent, not a mode: mode gating happens per command.
+  function canArm() {
+    return endpoint !== null && verified && Boolean(activeToken) && !isStale() && !connectionDetail.length &&
+      modeInput.value === 'remote' && remoteAddress(addressInput.value) === endpoint && !tokenInput.value && !unknownOutcome;
+  }
+
+  function canStop() {
+    return !stopping && verified && (endpoint === null || (armed && Boolean(activeToken)));
+  }
+
   function moveBlock(arm) {
-    if (endpoint !== null) return t('readOnly');
+    if (endpoint !== null && !armed) return t('readOnly');
     if (stopping) return t('stopping');
     if (motion) return t('busy');
-    if (!mockVerified || connectionDetail.length || !snapshot) return t('needMock');
+    if (unknownOutcome) return t('unknown');
+    if (!verified || connectionDetail.length || !snapshot) return t(endpoint === null ? 'needMock' : 'unverified');
     if (isStale()) return t('stale');
+    if (endpoint !== null && !(snapshot.mode === 'supervised' || (snapshot.mock && snapshot.mode === 'auto'))) return t('modeBlocked');
     const state = snapshot.arms[arm];
     if (state?.fault || state?.error) return `${t(arm)}: ${state.fault || state.error}`;
     if (!state?.tcp_pose || state.moving !== false) return `${t(arm)} · ${t('notReady')}`;
@@ -262,10 +311,12 @@ function mountWorkbench(root, call) {
 
   function render() {
     const busy = Boolean(motion || stopping);
-    const target = endpoint === null ? t('local') : `${t('remote')} · ${endpoint}`;
+    manualInput.checked = armed;
+    manualInput.disabled = busy || (!armed && !canArm());
+    const target = endpoint === null ? t('local') : `${t('remote')} · ${endpoint}${armed ? ` · ${t('armed')}` : ''}`;
     output('target', target);
     output('active-target', `${t('targetLabel')}: ${target}`);
-    output('address-error', addressError ? t('invalidAddress') : '');
+    output('address-error', addressError ? t('invalidAddress') : connectionDetail[0] === 'hostMismatch' ? t('hostMismatch') : '');
     applyButton.disabled = busy;
     modeInput.disabled = busy;
     addressInput.disabled = tokenInput.disabled = busy || modeInput.value !== 'remote';
@@ -285,7 +336,8 @@ function mountWorkbench(root, call) {
     }
     outputs.status.dataset.kind = kind;
     output('status', status);
-    const oldFrame = !frame.hidden && (cameraDetail || connectionDetail.length || (!busy && snapshot && isStale()));
+    const oldFrame = !frame.hidden && (cameraDetail || connectionDetail.length || clock.performance.now() - frameAt >= STALE_MS);
+    frame.title = t('snapshotLabel');
     output('camera', [cameraDetail ? text('cameraFailed', detailText(cameraDetail)) : '', oldFrame ? t('previous') : ''].filter(Boolean).join(' · '));
     renderFeedback();
     for (const arm of ARMS) {
@@ -300,30 +352,31 @@ function mountWorkbench(root, call) {
     for (const button of moveButtons) button.disabled = Boolean(reason);
     output('motion-hint', reason || t('jogHint'));
     refreshButton.disabled = busy || observation?.full === true;
-    // Retain an out-of-band stop path if a previously verified mock connection drops.
-    stopButton.disabled = Boolean(endpoint !== null || stopping || !mockVerified);
+    // Stop remains available during motion, stale telemetry or an unknown outcome.
+    stopButton.disabled = !canStop();
   }
 
   function showFrame(image) {
     if (typeof image !== 'string' || !/^data:image\/jpeg;base64,[a-z0-9+/=]+$/i.test(image)) return false;
     if (frame.getAttribute('src') !== image) frame.setAttribute('src', image);
+    frameAt = clock.performance.now();
     frame.hidden = false;
     outputs['image-placeholder'].hidden = true;
     cameraDetail = '';
     return true;
   }
 
-  async function refresh(full) {
-    if (disposed || motion || stopping || (!full && observation) || observation?.full) return;
+  async function refresh(full, acknowledgeUnknown = false) {
+    if (disposed || motion || stopping || (unknownOutcome && !acknowledgeUnknown) || (!full && observation) || observation?.full) return;
     const token = invalidateObservation();
     observation = { full };
     const startedAt = clock.performance.now();
     render();
     try {
-      const { data } = await call('get_state', { arm: 'both' }, endpoint, activeToken);
+      const { data } = await request(token, 'get_state', { arm: 'both' });
       if (!isCurrent(token)) return;
       if (endpoint === null && data?.mock === false) {
-        mockVerified = false;
+        verified = armed = false;
         snapshot = null;
         frame.removeAttribute('src');
         frame.hidden = true;
@@ -335,21 +388,23 @@ function mountWorkbench(root, call) {
       if (data?.ok !== true || typeof data.mock !== 'boolean' || !data.arms?.left || !data.arms?.right) {
         throw new Error(data?.reason || (endpoint === null ? 'noState' : 'remoteNoState'));
       }
-      mockVerified = endpoint === null && data.mock;
+      if (snapshot && snapshot.mock !== data.mock) armed = false;
+      verified = true;
+      unknownOutcome = false;
       snapshot = data;
       sampleAt = startedAt;
       connectionDetail = [];
       render();
       if (full) {
         try {
-          const { image } = await call('get_images', { grid: false }, endpoint, activeToken);
+          const { image } = await request(token, 'get_images', { grid: false });
           if (isCurrent(token) && !showFrame(image)) throw new Error('noImage');
         } catch (error) {
           if (isCurrent(token)) cameraDetail = errorText(error);
         }
       }
     } catch (error) {
-      if (isCurrent(token)) {
+      if (isCurrent(token) && errorText(error) !== 'hostMismatch') {
         connectionDetail = ['disconnected', errorText(error)];
         sampleAt = null;
       }
@@ -377,7 +432,7 @@ function mountWorkbench(root, call) {
     feedback('busy', '', label);
     render();
     try {
-      const { data, image } = await call(tool, args, endpoint);
+      const { data, image } = await request(token, tool, args, true);
       if (!isCurrent(token)) return;
       if (data?.ok === true) {
         const outcome = data.dry_run || data.arms?.[args.arm]?.dry_run ? 'dryResult' : 'success';
@@ -391,7 +446,9 @@ function mountWorkbench(root, call) {
       observeAfter = true;
     } catch (error) {
       if (isCurrent(token)) {
-        connectionDetail = ['unverified', errorText(error)];
+        // The command may have reached the robot. Don't retry or unlock by polling.
+        unknownOutcome = true;
+        if (errorText(error) !== 'hostMismatch') connectionDetail = ['unverified', errorText(error)];
         feedback('unknown', 'error', label);
       }
     } finally {
@@ -405,7 +462,7 @@ function mountWorkbench(root, call) {
   }
 
   async function stop() {
-    if (disposed || endpoint !== null || stopping || !mockVerified) return;
+    if (disposed || !canStop()) return;
     const token = invalidateObservation();
     stopping = token;
     sampleAt = null;
@@ -413,7 +470,7 @@ function mountWorkbench(root, call) {
     feedback('stopping');
     render();
     try {
-      const { data } = await call('stop', { arm: 'both' }, endpoint);
+      const { data } = await request(token, 'stop', { arm: 'both' }, true);
       if (!isCurrent(token)) return;
       if (data?.ok === true) feedback('stopOk', 'ok');
       else if (data?.ok === false) feedback('stopFail', 'error', () => resultReason(data) || t('noDetails'));
@@ -421,7 +478,8 @@ function mountWorkbench(root, call) {
       readAfterStop = true;
     } catch (error) {
       if (isCurrent(token)) {
-        connectionDetail = ['unverified', errorText(error)];
+        unknownOutcome = true;
+        if (errorText(error) !== 'hostMismatch') connectionDetail = ['unverified', errorText(error)];
         feedback('unknown', 'error', () => t('stop'));
       }
     } finally {
@@ -447,7 +505,7 @@ function mountWorkbench(root, call) {
     tokenInput.value = '';
     invalidateObservation();
     endpoint = next;
-    mockVerified = false;
+    verified = armed = unknownOutcome = false;
     snapshot = sampleAt = null;
     frame.removeAttribute('src');
     frame.hidden = true;
@@ -466,8 +524,11 @@ function mountWorkbench(root, call) {
       case 'apply-connection': applyConnection(); break;
       case 'settings': dialog.showModal(); break;
       case 'done': dialog.close(); break;
-      case 'defaults': prefs = { ...DEFAULT_PREF }; applyPrefs(true); schedulePoll(); render(); break;
-      case 'refresh': void refresh(true); break;
+      case 'defaults':
+        cameraPoll.checked = false;
+        try { clock.localStorage.removeItem(CAMERA_KEY); } catch { /* storage unavailable */ }
+        prefs = { ...DEFAULT_PREF }; applyPrefs(true); schedulePoll(); render(); break;
+      case 'refresh': void refresh(true, true); break;
       case 'jog': {
         const { axis, sign } = button.dataset;
         const delta = JOG_MM * Number(sign);
@@ -496,9 +557,19 @@ function mountWorkbench(root, call) {
       if (key === 'interval') schedulePoll();
       render();
     }
+    if (event.target === manualInput) {
+      armed = !motion && !stopping && manualInput.checked && canArm();
+      if (manualInput.checked && !armed) feedback('readOnly', 'error');
+      render();
+    }
+    if (event.target === cameraPoll) {
+      try { clock.localStorage.setItem(CAMERA_KEY, cameraPoll.checked ? '1' : '0'); } catch { /* storage unavailable */ }
+      schedulePoll();
+      if (cameraPoll.checked) void refresh(true);
+    }
     if (event.target === polling) {
       schedulePoll();
-      if (polling.checked) void refresh(false);
+      if (polling.checked) void refresh(Boolean(cameraPoll.checked));
     }
   }
 
@@ -518,30 +589,31 @@ function mountWorkbench(root, call) {
   panel.addEventListener('change', onChange);
   mounted.set(root, dispose);
   applyPrefs();
+  try { cameraPoll.checked = clock.localStorage.getItem(CAMERA_KEY) === '1'; } catch { /* storage unavailable */ }
   applyLanguage();
   statusTimer = clock.setInterval(render, 500);
   void refresh(true);
   return dispose;
 }
 
-    const styles = ".llmd-wb-host {\n  box-sizing: border-box;\n  height: 100%;\n  min-width: 0;\n  min-height: 0;\n  overflow: auto;\n  container: llmd-workbench / size;\n}\n\n.llmd-wb {\n  --wb-surface: color-mix(in srgb, Canvas 96%, CanvasText);\n  --wb-line: color-mix(in srgb, CanvasText 20%, Canvas);\n  --wb-muted: color-mix(in srgb, CanvasText 74%, Canvas);\n  --wb-accent: light-dark(#155bb5, #94c5ff);\n  --wb-error: light-dark(#a61e28, #ffa8ac);\n  --wb-ok: light-dark(#146342, #86e1b2);\n  --wb-gap: .5rem;\n  --wb-card-gap: .35rem;\n  --wb-inset: .5rem;\n  --wb-button-height: 1.75rem;\n  --wb-frame-max: clamp(4.5rem, 19cqh, 12rem);\n  box-sizing: border-box;\n  display: grid;\n  gap: var(--wb-gap);\n  max-width: 76rem;\n  margin-inline: auto;\n  padding: var(--wb-inset);\n  color: CanvasText;\n  color-scheme: light dark;\n  grid-template-columns: minmax(0, 1fr);\n  font-size: .8125rem;\n  line-height: 1.3;\n  overflow-wrap: anywhere;\n}\n\n.llmd-wb *, .llmd-wb *::before, .llmd-wb *::after { box-sizing: border-box; }\n.llmd-wb [hidden] { display: none !important; }\n.llmd-wb :is(h2, h3, p, dl, dd) { margin: 0; }\n.llmd-wb h2 { font-size: 1.125rem; line-height: 1.15; }\n.llmd-wb h3 { font-size: .875rem; line-height: 1.2; }\n\n.llmd-wb :is(.llmd-wb__eyebrow, .llmd-wb__badge) {\n  display: inline-block;\n  margin-block-end: .16rem;\n  border-radius: .3rem;\n  padding: .08rem .3rem;\n  background: color-mix(in srgb, var(--wb-accent) 12%, Canvas);\n  color: var(--wb-accent);\n  font-size: .625rem;\n  font-weight: 750;\n  letter-spacing: .07em;\n  vertical-align: middle;\n}\n\n.llmd-wb :is(.llmd-wb__bar, .llmd-wb__buttons) {\n  display: flex;\n  flex-wrap: wrap;\n  align-items: center;\n  min-width: 0;\n  gap: var(--wb-card-gap);\n}\n.llmd-wb .llmd-wb__bar { justify-content: space-between; }\n.llmd-wb .llmd-wb__brand { display: grid; justify-items: start; gap: .15rem; min-width: 0; }\n.llmd-wb .llmd-wb__poll { display: inline-flex; align-items: center; gap: .25rem; }\n.llmd-wb .llmd-wb__poll input { margin: 0; accent-color: var(--wb-accent); }\n.llmd-wb .llmd-wb__status {\n  padding: .2rem .45rem;\n  border-inline-start: 2px solid currentColor;\n  border-radius: .2rem;\n  background: var(--wb-surface);\n}\n.llmd-wb :is(.llmd-wb__status, .llmd-wb__feedback) { font-weight: 600; }\n.llmd-wb [data-kind=\"error\"] { color: var(--wb-error); }\n.llmd-wb [data-kind=\"ok\"] { color: var(--wb-ok); }\n.llmd-wb :is(.llmd-wb__hint, [data-out=\"camera\"]) { color: var(--wb-muted); font-size: .75rem; }\n.llmd-wb :is(.llmd-wb__hint, .llmd-wb__feedback, [data-out=\"camera\"]):empty { display: none; }\n\n.llmd-wb :is(.llmd-wb__layout, .llmd-wb__stack, .llmd-wb__card) {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  min-width: 0;\n  gap: var(--wb-gap);\n}\n.llmd-wb .llmd-wb__layout { align-items: start; }\n.llmd-wb :is(.llmd-wb__card, .llmd-wb__controls) {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  align-content: start;\n  gap: var(--wb-card-gap);\n  border: 1px solid var(--wb-line);\n  border-radius: .6rem;\n  padding: var(--wb-inset);\n  background: var(--wb-surface);\n}\n\n.llmd-wb .llmd-wb__viewport {\n  position: relative;\n  display: grid;\n  grid-template: \"frame\" auto / minmax(0, 1fr);\n  justify-self: center;\n  width: 100%;\n  max-width: calc(var(--wb-frame-max) * 4);\n  overflow: hidden;\n  border-radius: .35rem;\n  background: #172230;\n  color: #f1f6fc;\n}\n.llmd-wb .llmd-wb__viewport::before {\n  content: \"\";\n  grid-area: frame;\n  aspect-ratio: 4 / 1;\n  max-height: var(--wb-frame-max);\n}\n.llmd-wb .llmd-wb__viewport img {\n  position: absolute;\n  grid-area: frame;\n  inset: 0;\n  display: block;\n  width: 100%;\n  height: 100%;\n  object-fit: contain;\n}\n.llmd-wb .llmd-wb__viewport :is(.llmd-wb__placeholder, [data-out=\"image-placeholder\"]) {\n  z-index: 1;\n  grid-area: frame;\n  align-self: center;\n  justify-self: center;\n  padding: .15rem .4rem;\n  text-align: center;\n  font-size: .75rem;\n}\n.llmd-wb .llmd-wb__legend {\n  display: grid;\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n  gap: .25rem;\n  color: var(--wb-muted);\n  text-align: center;\n  font-size: .6875rem;\n  line-height: 1.2;\n}\n.llmd-wb .llmd-wb__legend span { padding-inline: .15rem; }\n.llmd-wb .llmd-wb__legend span + span { border-inline-start: 1px solid var(--wb-line); }\n.llmd-wb .llmd-wb__viewport:has(> .llmd-wb__legend) { grid-template-areas: \"frame\" \"legend\"; }\n.llmd-wb .llmd-wb__viewport > .llmd-wb__legend {\n  grid-area: legend;\n  padding: .2rem;\n  background: Canvas;\n}\n\n.llmd-wb .llmd-wb__metrics {\n  display: grid;\n  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);\n  column-gap: .35rem;\n  row-gap: .125rem;\n  font-size: .75rem;\n  line-height: 1.2;\n  font-variant-numeric: tabular-nums;\n}\n.llmd-wb .llmd-wb__metrics dt { max-width: 4.75rem; color: var(--wb-muted); }\n.llmd-wb .llmd-wb__metrics dd { min-width: 0; font-weight: 550; }\n\n.llmd-wb :is(.llmd-wb__jog, .llmd-wb__actions) { display: grid; align-items: stretch; }\n.llmd-wb .llmd-wb__jog { grid-template-columns: repeat(3, minmax(0, 1fr)); }\n.llmd-wb .llmd-wb__actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n.llmd-wb :is(button, select) {\n  min-height: var(--wb-button-height);\n  min-width: 0;\n  max-width: 100%;\n  border: 1px solid var(--wb-line);\n  border-radius: .35rem;\n  padding: .16rem .45rem;\n  background: Canvas;\n  color: CanvasText;\n  font: inherit;\n  font-size: .75rem;\n  line-height: 1.2;\n}\n.llmd-wb :is(button:not(:disabled), select, .llmd-wb__poll) { cursor: pointer; }\n.llmd-wb button:not(:disabled):hover { background: color-mix(in srgb, var(--wb-accent) 9%, Canvas); }\n.llmd-wb button[aria-pressed=\"true\"] { border-color: var(--wb-accent); color: var(--wb-accent); font-weight: 650; }\n.llmd-wb button:disabled { opacity: .6; }\n.llmd-wb button.llmd-wb__stop {\n  border-color: var(--wb-error);\n  background: color-mix(in srgb, var(--wb-error) 8%, Canvas);\n  color: var(--wb-error);\n  font-weight: 750;\n}\n.llmd-wb :focus-visible { outline: 2px solid var(--wb-accent); outline-offset: 1px; }\n\n/* Visual hierarchy: cool camera surface, independently accented arm telemetry, clear stop action. */\n.llmd-wb { --wb-accent: light-dark(#14646e, #80dce4); --wb-line: color-mix(in srgb, CanvasText 16%, Canvas); background: linear-gradient(150deg, color-mix(in srgb, var(--wb-accent) 9%, Canvas), Canvas 58%); }\n.llmd-wb[data-theme=\"dark\"] { color-scheme: dark; }\n.llmd-wb[data-theme=\"light\"] { color-scheme: light; }\n.llmd-wb .llmd-wb__card { background: color-mix(in srgb, Canvas 98%, var(--wb-accent)); box-shadow: 0 1px 3px color-mix(in srgb, CanvasText 8%, transparent); }\n.llmd-wb .llmd-wb__arm h3::before, .llmd-wb .llmd-wb__camera h3::before, .llmd-wb .llmd-wb__controls h3::before { content: ''; display: inline-block; width: .24rem; height: .84em; margin-inline-end: .4rem; border-radius: 1rem; background: var(--wb-accent); }\n.llmd-wb .llmd-wb__arm:nth-child(2) h3::before { background: light-dark(#7653a6, #bf9ee7); }\n.llmd-wb .llmd-wb__rail { display: flex; align-items: stretch; gap: .3rem; }\n.llmd-wb .llmd-wb__status { flex: 1; align-content: center; }\n.llmd-wb .llmd-wb__status[data-kind=\"ok\"] { background: color-mix(in srgb, var(--wb-ok) 9%, Canvas); }\n.llmd-wb .llmd-wb__settings-trigger { display: grid; place-content: center; width: 2rem; color: var(--wb-accent); }\n.llmd-wb .llmd-wb__prefs { box-sizing: border-box; width: min(20rem, 92vw); max-height: 85vh; overflow: auto; margin: auto; padding: 1rem; border: 1px solid var(--wb-line); background: Canvas; color: CanvasText; border-radius: .8rem; box-shadow: 0 .75rem 3rem #0003; }\n.llmd-wb .llmd-wb__prefs[open] { display: grid; gap: .65rem; }\n.llmd-wb .llmd-wb__prefs::backdrop { background: #10222965; }\n.llmd-wb .llmd-wb__prefs label, .llmd-wb .llmd-wb__prefs footer { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }\n.llmd-wb .llmd-wb__prefs select { min-width: 6rem; }\n.llmd-wb .llmd-wb__prefs footer { border-top: 1px solid var(--wb-line); padding-top: .65rem; }\n.llmd-wb .llmd-wb__prefs [data-action=\"done\"] { background: var(--wb-accent); color: Canvas; border-color: transparent; }\n\n.llmd-wb .llmd-wb__connection { display: grid; gap: .45rem; min-width: 0; margin: 0; padding: .55rem; border: 1px solid var(--wb-line); border-radius: .45rem; }\n.llmd-wb .llmd-wb__connection legend { padding-inline: .25rem; font-weight: 650; }\n.llmd-wb .llmd-wb__connection input { min-width: 0; width: 62%; min-height: var(--wb-button-height); border: 1px solid var(--wb-line); border-radius: .35rem; padding: .16rem .45rem; background: Canvas; color: CanvasText; font: inherit; }\n.llmd-wb .llmd-wb__connection [data-out=\"address-error\"]:empty { display: none; }\n.llmd-wb .llmd-wb__eyebrow { max-width: 100%; }\n\n/* Leave room for a classic scrollbar without flipping back to stacked cards. */\n@container llmd-workbench (min-width: 16rem) {\n  .llmd-wb .llmd-wb__stack { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n  .llmd-wb .llmd-wb__jog { grid-template-columns: repeat(6, minmax(0, 1fr)); }\n  .llmd-wb .llmd-wb__actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }\n}\n\n/* Give each multi-value metric the full width of a compact arm card. */\n@container llmd-workbench (max-width: 28rem), llmd-workbench (min-width: 41rem) and (max-width: 66rem) {\n  .llmd-wb .llmd-wb__metrics :is(dt:has(+ dd[data-out$=\"-pose\"], + dd[data-out$=\"-joints\"]), dd[data-out$=\"-pose\"], dd[data-out$=\"-joints\"]) {\n    grid-column: 1 / -1;\n  }\n}\n\n@container llmd-workbench (max-width: 32rem) {\n  .llmd-wb {\n    --wb-gap: .27rem;\n    --wb-card-gap: .15rem;\n    --wb-inset: .375rem;\n    --wb-button-height: 1.5rem;\n    line-height: 1.2;\n  }\n  .llmd-wb h2 { font-size: .9375rem; }\n  .llmd-wb .llmd-wb__head :is(button, select) { padding-inline: .25rem; }\n  .llmd-wb .llmd-wb__metrics { font-size: .6875rem; line-height: 1.15; row-gap: .0625rem; }\n  .llmd-wb .llmd-wb__legend { line-height: 1.1; }\n}\n\n@container llmd-workbench (max-width: 18.5rem) {\n  .llmd-wb { --wb-gap: .16rem; --wb-inset: .25rem; }\n  .llmd-wb .llmd-wb__head { gap: .12rem; }\n  .llmd-wb .llmd-wb__head h2 { font-size: .85rem; }\n}\n\n@container llmd-workbench (min-width: 41rem) {\n  .llmd-wb .llmd-wb__layout { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }\n}\n\n@container llmd-workbench (min-width: 52rem) and (min-height: 33rem) {\n  .llmd-wb { --wb-gap: .75rem; --wb-card-gap: .5rem; --wb-inset: .75rem; --wb-button-height: 2rem; }\n}\n\n@container llmd-workbench (max-height: 31rem) {\n  .llmd-wb {\n    --wb-gap: .3rem;\n    --wb-card-gap: .2rem;\n    --wb-inset: .3rem;\n    --wb-button-height: 1.5rem;\n    --wb-frame-max: 7rem;\n  }\n}\n\n@container llmd-workbench (max-width: 23rem) and (max-height: 31rem) {\n  .llmd-wb { --wb-frame-max: 4.25rem; }\n}\n";
+    const styles = ".llmd-wb-host {\n  box-sizing: border-box;\n  height: 100%;\n  min-width: 0;\n  min-height: 0;\n  overflow: auto;\n  container: llmd-workbench / size;\n}\n\n.llmd-wb {\n  --wb-surface: color-mix(in srgb, Canvas 96%, CanvasText);\n  --wb-line: color-mix(in srgb, CanvasText 20%, Canvas);\n  --wb-muted: color-mix(in srgb, CanvasText 74%, Canvas);\n  --wb-accent: light-dark(#155bb5, #94c5ff);\n  --wb-error: light-dark(#a61e28, #ffa8ac);\n  --wb-ok: light-dark(#146342, #86e1b2);\n  --wb-gap: .5rem;\n  --wb-card-gap: .35rem;\n  --wb-inset: .5rem;\n  --wb-button-height: 1.75rem;\n  --wb-frame-max: clamp(4.5rem, 19cqh, 12rem);\n  box-sizing: border-box;\n  display: grid;\n  gap: var(--wb-gap);\n  max-width: 76rem;\n  margin-inline: auto;\n  padding: var(--wb-inset);\n  color: CanvasText;\n  color-scheme: light dark;\n  grid-template-columns: minmax(0, 1fr);\n  font-size: .8125rem;\n  line-height: 1.3;\n  overflow-wrap: anywhere;\n}\n\n.llmd-wb *, .llmd-wb *::before, .llmd-wb *::after { box-sizing: border-box; }\n.llmd-wb [hidden] { display: none !important; }\n.llmd-wb :is(h2, h3, p, dl, dd) { margin: 0; }\n.llmd-wb h2 { font-size: 1.125rem; line-height: 1.15; }\n.llmd-wb h3 { font-size: .875rem; line-height: 1.2; }\n\n.llmd-wb :is(.llmd-wb__eyebrow, .llmd-wb__badge) {\n  display: inline-block;\n  margin-block-end: .16rem;\n  border-radius: .3rem;\n  padding: .08rem .3rem;\n  background: color-mix(in srgb, var(--wb-accent) 12%, Canvas);\n  color: var(--wb-accent);\n  font-size: .625rem;\n  font-weight: 750;\n  letter-spacing: .07em;\n  vertical-align: middle;\n}\n\n.llmd-wb :is(.llmd-wb__bar, .llmd-wb__buttons) {\n  display: flex;\n  flex-wrap: wrap;\n  align-items: center;\n  min-width: 0;\n  gap: var(--wb-card-gap);\n}\n.llmd-wb .llmd-wb__bar { justify-content: space-between; }\n.llmd-wb .llmd-wb__brand { display: grid; justify-items: start; gap: .15rem; min-width: 0; }\n.llmd-wb .llmd-wb__poll { display: inline-flex; align-items: center; gap: .25rem; }\n.llmd-wb .llmd-wb__poll input { margin: 0; accent-color: var(--wb-accent); }\n.llmd-wb .llmd-wb__status {\n  padding: .2rem .45rem;\n  border-inline-start: 2px solid currentColor;\n  border-radius: .2rem;\n  background: var(--wb-surface);\n}\n.llmd-wb :is(.llmd-wb__status, .llmd-wb__feedback) { font-weight: 600; }\n.llmd-wb [data-kind=\"error\"] { color: var(--wb-error); }\n.llmd-wb [data-kind=\"ok\"] { color: var(--wb-ok); }\n.llmd-wb :is(.llmd-wb__hint, [data-out=\"camera\"]) { color: var(--wb-muted); font-size: .75rem; }\n.llmd-wb :is(.llmd-wb__hint, .llmd-wb__feedback, [data-out=\"camera\"]):empty { display: none; }\n\n.llmd-wb :is(.llmd-wb__layout, .llmd-wb__stack, .llmd-wb__card) {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  min-width: 0;\n  gap: var(--wb-gap);\n}\n.llmd-wb .llmd-wb__layout { align-items: start; }\n.llmd-wb :is(.llmd-wb__card, .llmd-wb__controls) {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  align-content: start;\n  gap: var(--wb-card-gap);\n  border: 1px solid var(--wb-line);\n  border-radius: .6rem;\n  padding: var(--wb-inset);\n  background: var(--wb-surface);\n}\n\n.llmd-wb .llmd-wb__viewport {\n  position: relative;\n  display: grid;\n  grid-template: \"frame\" auto / minmax(0, 1fr);\n  justify-self: center;\n  width: 100%;\n  max-width: calc(var(--wb-frame-max) * 4);\n  overflow: hidden;\n  border-radius: .35rem;\n  background: #172230;\n  color: #f1f6fc;\n}\n.llmd-wb .llmd-wb__viewport::before {\n  content: \"\";\n  grid-area: frame;\n  aspect-ratio: 4 / 1;\n  max-height: var(--wb-frame-max);\n}\n.llmd-wb .llmd-wb__viewport img {\n  position: absolute;\n  grid-area: frame;\n  inset: 0;\n  display: block;\n  width: 100%;\n  height: 100%;\n  object-fit: contain;\n}\n.llmd-wb .llmd-wb__viewport :is(.llmd-wb__placeholder, [data-out=\"image-placeholder\"]) {\n  z-index: 1;\n  grid-area: frame;\n  align-self: center;\n  justify-self: center;\n  padding: .15rem .4rem;\n  text-align: center;\n  font-size: .75rem;\n}\n.llmd-wb .llmd-wb__legend {\n  display: grid;\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n  gap: .25rem;\n  color: var(--wb-muted);\n  text-align: center;\n  font-size: .6875rem;\n  line-height: 1.2;\n}\n.llmd-wb .llmd-wb__legend span { padding-inline: .15rem; }\n.llmd-wb .llmd-wb__legend span + span { border-inline-start: 1px solid var(--wb-line); }\n.llmd-wb .llmd-wb__viewport:has(> .llmd-wb__legend) { grid-template-areas: \"frame\" \"legend\"; }\n.llmd-wb .llmd-wb__viewport > .llmd-wb__legend {\n  grid-area: legend;\n  padding: .2rem;\n  background: Canvas;\n}\n\n.llmd-wb .llmd-wb__metrics {\n  display: grid;\n  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);\n  column-gap: .35rem;\n  row-gap: .125rem;\n  font-size: .75rem;\n  line-height: 1.2;\n  font-variant-numeric: tabular-nums;\n}\n.llmd-wb .llmd-wb__metrics dt { max-width: 4.75rem; color: var(--wb-muted); }\n.llmd-wb .llmd-wb__metrics dd { min-width: 0; font-weight: 550; }\n\n.llmd-wb :is(.llmd-wb__jog, .llmd-wb__actions) { display: grid; align-items: stretch; }\n.llmd-wb .llmd-wb__jog { grid-template-columns: repeat(3, minmax(0, 1fr)); }\n.llmd-wb .llmd-wb__actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n.llmd-wb :is(button, select) {\n  min-height: var(--wb-button-height);\n  min-width: 0;\n  max-width: 100%;\n  border: 1px solid var(--wb-line);\n  border-radius: .35rem;\n  padding: .16rem .45rem;\n  background: Canvas;\n  color: CanvasText;\n  font: inherit;\n  font-size: .75rem;\n  line-height: 1.2;\n}\n.llmd-wb :is(button:not(:disabled), select, .llmd-wb__poll) { cursor: pointer; }\n.llmd-wb button:not(:disabled):hover { background: color-mix(in srgb, var(--wb-accent) 9%, Canvas); }\n.llmd-wb button[aria-pressed=\"true\"] { border-color: var(--wb-accent); color: var(--wb-accent); font-weight: 650; }\n.llmd-wb button:disabled { opacity: .6; }\n.llmd-wb button.llmd-wb__stop {\n  border-color: var(--wb-error);\n  background: color-mix(in srgb, var(--wb-error) 8%, Canvas);\n  color: var(--wb-error);\n  font-weight: 750;\n}\n.llmd-wb :focus-visible { outline: 2px solid var(--wb-accent); outline-offset: 1px; }\n\n/* Visual hierarchy: cool camera surface, independently accented arm telemetry, clear stop action. */\n.llmd-wb { --wb-accent: light-dark(#14646e, #80dce4); --wb-line: color-mix(in srgb, CanvasText 16%, Canvas); background: linear-gradient(150deg, color-mix(in srgb, var(--wb-accent) 9%, Canvas), Canvas 58%); }\n.llmd-wb[data-theme=\"dark\"] { color-scheme: dark; }\n.llmd-wb[data-theme=\"light\"] { color-scheme: light; }\n.llmd-wb .llmd-wb__card { background: color-mix(in srgb, Canvas 98%, var(--wb-accent)); box-shadow: 0 1px 3px color-mix(in srgb, CanvasText 8%, transparent); }\n.llmd-wb .llmd-wb__arm h3::before, .llmd-wb .llmd-wb__camera h3::before, .llmd-wb .llmd-wb__controls h3::before { content: ''; display: inline-block; width: .24rem; height: .84em; margin-inline-end: .4rem; border-radius: 1rem; background: var(--wb-accent); }\n.llmd-wb .llmd-wb__arm:nth-child(2) h3::before { background: light-dark(#7653a6, #bf9ee7); }\n.llmd-wb .llmd-wb__rail { display: flex; align-items: stretch; gap: .3rem; }\n.llmd-wb .llmd-wb__status { flex: 1; align-content: center; }\n.llmd-wb .llmd-wb__status[data-kind=\"ok\"] { background: color-mix(in srgb, var(--wb-ok) 9%, Canvas); }\n.llmd-wb .llmd-wb__settings-trigger { display: grid; place-content: center; width: 2rem; color: var(--wb-accent); }\n.llmd-wb .llmd-wb__prefs { box-sizing: border-box; width: min(20rem, 92vw); max-height: 85vh; overflow: auto; margin: auto; padding: 1rem; border: 1px solid var(--wb-line); background: Canvas; color: CanvasText; border-radius: .8rem; box-shadow: 0 .75rem 3rem #0003; }\n.llmd-wb .llmd-wb__prefs[open] { display: grid; gap: .65rem; }\n.llmd-wb .llmd-wb__prefs::backdrop { background: #10222965; }\n.llmd-wb .llmd-wb__prefs label, .llmd-wb .llmd-wb__prefs footer { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }\n.llmd-wb .llmd-wb__prefs select { min-width: 6rem; }\n.llmd-wb .llmd-wb__prefs footer { border-top: 1px solid var(--wb-line); padding-top: .65rem; }\n.llmd-wb .llmd-wb__prefs [data-action=\"done\"] { background: var(--wb-accent); color: Canvas; border-color: transparent; }\n\n.llmd-wb .llmd-wb__connection { display: grid; gap: .45rem; min-width: 0; margin: 0; padding: .55rem; border: 1px solid var(--wb-line); border-radius: .45rem; }\n.llmd-wb .llmd-wb__connection legend { padding-inline: .25rem; font-weight: 650; }\n.llmd-wb .llmd-wb__prefs input[type=\"checkbox\"] { accent-color: var(--wb-accent); }\n.llmd-wb .llmd-wb__connection input:not([type=\"checkbox\"]) { min-width: 0; width: 62%; min-height: var(--wb-button-height); border: 1px solid var(--wb-line); border-radius: .35rem; padding: .16rem .45rem; background: Canvas; color: CanvasText; font: inherit; }\n.llmd-wb .llmd-wb__connection [data-out=\"address-error\"]:empty { display: none; }\n.llmd-wb .llmd-wb__eyebrow { max-width: 100%; }\n\n/* Leave room for a classic scrollbar without flipping back to stacked cards. */\n@container llmd-workbench (min-width: 16rem) {\n  .llmd-wb .llmd-wb__stack { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n  .llmd-wb .llmd-wb__jog { grid-template-columns: repeat(6, minmax(0, 1fr)); }\n  .llmd-wb .llmd-wb__actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }\n}\n\n/* Give each multi-value metric the full width of a compact arm card. */\n@container llmd-workbench (max-width: 28rem), llmd-workbench (min-width: 41rem) and (max-width: 66rem) {\n  .llmd-wb .llmd-wb__metrics :is(dt:has(+ dd[data-out$=\"-pose\"], + dd[data-out$=\"-joints\"]), dd[data-out$=\"-pose\"], dd[data-out$=\"-joints\"]) {\n    grid-column: 1 / -1;\n  }\n}\n\n@container llmd-workbench (max-width: 32rem) {\n  .llmd-wb {\n    --wb-gap: .27rem;\n    --wb-card-gap: .15rem;\n    --wb-inset: .375rem;\n    --wb-button-height: 1.5rem;\n    line-height: 1.2;\n  }\n  .llmd-wb h2 { font-size: .9375rem; }\n  .llmd-wb .llmd-wb__head :is(button, select) { padding-inline: .25rem; }\n  .llmd-wb .llmd-wb__metrics { font-size: .6875rem; line-height: 1.15; row-gap: .0625rem; }\n  .llmd-wb .llmd-wb__legend { line-height: 1.1; }\n}\n\n@container llmd-workbench (max-width: 18.5rem) {\n  .llmd-wb { --wb-gap: .16rem; --wb-inset: .25rem; }\n  .llmd-wb .llmd-wb__head { gap: .12rem; }\n  .llmd-wb .llmd-wb__head h2 { font-size: .85rem; }\n}\n\n@container llmd-workbench (min-width: 41rem) {\n  .llmd-wb .llmd-wb__layout { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }\n}\n\n@container llmd-workbench (min-width: 52rem) and (min-height: 33rem) {\n  .llmd-wb { --wb-gap: .75rem; --wb-card-gap: .5rem; --wb-inset: .75rem; --wb-button-height: 2rem; }\n}\n\n@container llmd-workbench (max-height: 31rem) {\n  .llmd-wb {\n    --wb-gap: .3rem;\n    --wb-card-gap: .2rem;\n    --wb-inset: .3rem;\n    --wb-button-height: 1.5rem;\n    --wb-frame-max: 7rem;\n  }\n}\n\n@container llmd-workbench (max-width: 23rem) and (max-height: 31rem) {\n  .llmd-wb { --wb-frame-max: 4.25rem; }\n}\n";
     const kind = '@local/dsh-llm-direct-workbench';
     const namespace = 'llmDirectWorkbench';
     const copy = {
-      en: { title: 'Robot Workbench', description: 'Inspect and operate the simulated X-Trainer' },
-      zh: { title: '机器人工作台', description: '查看和操作模拟 X-Trainer' },
+      en: { title: 'Robot Workbench', description: 'Inspect X-Trainer snapshots and telemetry; manual control is optional' },
+      zh: { title: '机器人工作台', description: '查看 X-Trainer 快照与状态，可选择启用手动控制' },
     };
     function icon({ size = 16 } = {}) {
       return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true },
         h('rect', { x: 4, y: 7, width: 16, height: 12, rx: 3 }),
         h('path', { d: 'M12 3v4M8 12h1m6 0h1m-7 3h6M2 12v3m20-3v3' }));
     }
-    async function call(tool, args, signal, endpoint, token) {
+    async function call(tool, args, signal, endpoint, token, manual) {
       const path = 'api/llm-direct-workbench/call';
       const transport = globalThis.__DSH_TRANSPORT__;
       const init = {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ tool, args, ...(endpoint == null ? {} : { endpoint, ...(token ? { token } : {}) }) }), signal: AbortSignal.any([signal, AbortSignal.timeout(48_000)]),
+        body: JSON.stringify({ tool, args, ...(endpoint == null ? {} : { endpoint, ...(token ? { token } : {}), ...(manual === true ? { manual: true } : {}) }) }), signal: AbortSignal.any([signal, AbortSignal.timeout(48_000)]),
       };
       const response = transport?.fetch
         ? await transport.fetch(path, init)
@@ -554,7 +626,7 @@ function mountWorkbench(root, call) {
       const root = useRef(null);
       useEffect(() => {
         const controller = new AbortController();
-        const dispose = mountWorkbench(root.current, (tool, args, endpoint, token) => call(tool, args, controller.signal, endpoint, token));
+        const dispose = mountWorkbench(root.current, (tool, args, endpoint, token, manual) => call(tool, args, controller.signal, endpoint, token, manual));
         return () => { dispose(); controller.abort(); };
       }, []);
       return h('div', { className: 'llmd-wb-host' }, h('style', null, styles), h('div', { ref: root, className: 'llmd-wb-host__root' }));

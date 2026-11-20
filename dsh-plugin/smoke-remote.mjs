@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
+import { createServer as mockHttp } from 'node:http';
 import { resolve, join } from 'node:path';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -43,3 +44,65 @@ try {
   }
   console.log('PASS authenticated mock reads, endpoint echo, guarded manual controls, invalid requests');
 } finally { dispose(); child.kill(); await exited; }
+
+// Inert protocol recorder. Change only the declared identity/mode, never load a driver.
+let mode = 'auto', mock = false, issueSession = true, disconnect = false;
+let serial = 0, stateReads = 0, dispatches = 0, pauseState;
+const sessions = new Map();
+const server = mockHttp(async (req, res) => {
+  const session = req.headers['mcp-session-id'];
+  const fail = () => { res.writeHead(400).end(); };
+  if (req.headers.authorization !== `Bearer ${token}`) return fail();
+  if (req.method === 'DELETE') { sessions.delete(session); res.writeHead(204).end(); return; }
+  const chunks = []; for await (const chunk of req) chunks.push(chunk);
+  const { method, params, id } = JSON.parse(Buffer.concat(chunks));
+  res.setHeader('content-type', 'application/json');
+  const send = result => res.end(JSON.stringify({ jsonrpc: '2.0', result, id }));
+  const data = x => send({ content: [{ type: 'text', text: JSON.stringify(x) }] });
+  if (method === 'initialize') {
+    if (issueSession) { const key = `fixture-${++serial}`; sessions.set(key, false); res.setHeader('mcp-session-id', key); }
+    return send({ serverInfo: { name: 'llm-direct' }, protocolVersion: params.protocolVersion });
+  }
+  if (method === 'notifications/initialized') return res.writeHead(202).end();
+  if (method !== 'tools/call' || !sessions.has(session)) return fail();
+  if (params.name === 'get_state') {
+    stateReads++; sessions.set(session, true);
+    if (pauseState) { const { entered, resume } = pauseState; pauseState = undefined; entered(); await resume; }
+    return data({ ok: true, mock, mode, arms: { left: { arm: 'left' }, right: { arm: 'right' } } });
+  }
+  dispatches++;
+  if (!sessions.get(session)) return fail();
+  if (disconnect) { req.socket.destroy(); return; }
+  return data({ ok: true });
+});
+server.listen(0, '127.0.0.1'); await once(server, 'listening');
+try {
+  const target = `http://127.0.0.1:${server.address().port}/mcp`;
+  const action = (tool = 'gripper') => call(tool, tool === 'stop' ? { arm: 'both' } : { arm: 'left', opening: 1 }, token, { endpoint: target, manual: true });
+  for (const [isMock, declaredMode, tool, allowed] of [
+    [false, 'auto', 'gripper', false], [false, 'dry_run', 'gripper', false], [false, 'supervised', 'gripper', true],
+    [false, 'auto', 'stop', true], [false, 'dry_run', 'stop', true], [true, 'supervised', 'gripper', true],
+    [true, 'dry_run', 'stop', false], ['true', 'auto', 'gripper', false],
+  ]) {
+    mock = isMock; mode = declaredMode;
+    const before = dispatches, checked = stateReads;
+    assert.equal((await action(tool)).ok, allowed); assert.equal(dispatches - before, Number(allowed)); assert.equal(stateReads - checked, 1);
+  }
+  mock = true; mode = 'auto';
+  issueSession = false; const before = dispatches;
+  assert.equal((await action()).ok, false); assert.equal(dispatches, before);
+  issueSession = true; disconnect = true;
+  assert.equal((await action()).status, 502); assert.equal(dispatches, before + 1, 'never replay after lost response');
+  disconnect = false;
+  const entered = Promise.withResolvers(), resume = Promise.withResolvers();
+  pauseState = { entered: entered.resolve, resume: resume.promise };
+  const pending = action();
+  try {
+    await Promise.race([entered.promise, pending.then(() => { throw new Error('Did not enter preflight'); })]);
+    assert.equal((await action()).status, 409);
+    assert.equal((await action('stop')).status, 200, 'stop has reserved capacity');
+  } finally { resume.resolve(); }
+  assert.equal((await pending).status, 409, 'stop cancels a motion still in preflight');
+  assert.equal(dispatches, before + 2); assert.equal(sessions.size, 0);
+  console.log('PASS loopback policy, same-session preflight, concurrency, stop priority and no replay');
+} finally { await new Promise(done => server.close(done)); }

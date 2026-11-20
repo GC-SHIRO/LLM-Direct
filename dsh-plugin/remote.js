@@ -190,7 +190,7 @@ export async function remoteCall(endpoint, tool, args, signal, token, manual) {
     const state = verifiedState(await invoke('get_state', stateArgs, 2), stateArgs.arm);
     if (tool === 'get_state') return { endpoint, data: state };
     if (tool === 'get_images') return { endpoint, image: imageResult(await invoke(tool, parameters, 3)) };
-    if (!(state.mode === 'supervised' || (state.mock && state.mode === 'auto') || (!state.mock && stop))) {
+    if (!(state.mode === 'supervised' || state.mode === 'auto' || (!state.mock && stop))) {
       throw Object.assign(new Error('Manual command not allowed in this target mode'), { status: 403 });
     }
     if (!stop && epoch !== stopEpoch) throw Object.assign(new Error('Cancelled by stop before dispatch'), { status: 409 });

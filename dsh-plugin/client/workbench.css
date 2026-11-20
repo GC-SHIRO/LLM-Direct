@@ -208,7 +208,8 @@
 
 .llmd-wb .llmd-wb__connection { display: grid; gap: .45rem; min-width: 0; margin: 0; padding: .55rem; border: 1px solid var(--wb-line); border-radius: .45rem; }
 .llmd-wb .llmd-wb__connection legend { padding-inline: .25rem; font-weight: 650; }
-.llmd-wb .llmd-wb__connection input { min-width: 0; width: 62%; min-height: var(--wb-button-height); border: 1px solid var(--wb-line); border-radius: .35rem; padding: .16rem .45rem; background: Canvas; color: CanvasText; font: inherit; }
+.llmd-wb .llmd-wb__prefs input[type="checkbox"] { accent-color: var(--wb-accent); }
+.llmd-wb .llmd-wb__connection input:not([type="checkbox"]) { min-width: 0; width: 62%; min-height: var(--wb-button-height); border: 1px solid var(--wb-line); border-radius: .35rem; padding: .16rem .45rem; background: Canvas; color: CanvasText; font: inherit; }
 .llmd-wb .llmd-wb__connection [data-out="address-error"]:empty { display: none; }
 .llmd-wb .llmd-wb__eyebrow { max-width: 100%; }
 
